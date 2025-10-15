@@ -111,15 +111,26 @@ export async function GET() {
     new Set(tenancies.map((t) => m2oId(t.main_property_id)).filter((x): x is number => !!x))
   );
 
-  let salesByProp = new Map<number, OdooM2O | null>();
-  if (propIds.length) {
-    const props = await odoo.executeKw<PropertySales[]>(
-      "property.property",
-      "read",
-      [propIds, ["sales_person_id"]]
-    );
-    for (const p of props) salesByProp.set(p.id, (p.sales_person_id as OdooM2O) ?? null);
+ // types utiles
+type OdooM2O = [number, string];
+interface PropertySales {
+  id: number;
+  sales_person_id?: OdooM2O | false | null;
+}
+
+const salesByProp = new Map<number, OdooM2O | null>(); // ← const OK (on mute la Map, pas la ref)
+if (propIds.length > 0) {
+  const props = await odoo.executeKw<PropertySales[]>(
+    "property.property",
+    "read",
+    [propIds, ["sales_person_id"]]
+  );
+  for (const p of props) {
+    const m2o = (p.sales_person_id ?? null) as OdooM2O | null;
+    salesByProp.set(p.id, m2o);
   }
+}
+
 
   // Contexte temps
   const now = new Date(); // Europe/Paris côté runtime

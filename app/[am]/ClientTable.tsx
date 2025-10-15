@@ -95,6 +95,8 @@ export default function ClientTable({ amSlug }: { amSlug: string }) {
     (async () => {
       try {
         await refresh();
+      } catch (e: unknown) {
+        console.error(e);
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -143,9 +145,10 @@ export default function ClientTable({ amSlug }: { amSlug: string }) {
       }
       await refresh();
       alert(`Rent mis à jour (tenancy ${r.id}).`);
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.error(e);
-      alert("Erreur: " + String(e?.message || e));
+      const msg = e instanceof Error ? e.message : String(e);
+      alert("Erreur: " + msg);
     } finally {
       setBusyId(null);
     }

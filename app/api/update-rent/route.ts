@@ -5,24 +5,31 @@ import { getServerSupabase } from "@/lib/supabase";
 
 export const dynamic = "force-dynamic";
 
-/** Renvoie "YYYY-MM-01" du mois suivant la date "now" (UTC) */
+/** Renvoie "YYYY-MM-01" du mois suivant (UTC) */
 function firstDayOfNextMonthUTC(now = new Date()): string {
   const y = now.getUTCFullYear();
   const m = now.getUTCMonth(); // 0..11
-  const next = new Date(Date.UTC(y, m + 1, 1)); // 1er du mois suivant en UTC
+  const next = new Date(Date.UTC(y, m + 1, 1));
   const yyyy = next.getUTCFullYear();
   const mm = String(next.getUTCMonth() + 1).padStart(2, "0");
   return `${yyyy}-${mm}-01`;
 }
 
+type UiRow = Record<string, unknown> | null;
+
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json();
+    const body = (await req.json()) as {
+      tenancy_id?: unknown;
+      new_rent?: unknown;
+      ui_row?: UiRow;
+    };
+
     const tenancy_id = Number(body?.tenancy_id);
     const new_rent = Number(body?.new_rent);
-    const ui_row = body?.ui_row ?? null; // on logge tout
+    const ui_row: UiRow = body?.ui_row ?? null;
 
-    if (!tenancy_id || !Number.isFinite(tenancy_id)) {
+    if (!Number.isFinite(tenancy_id) || tenancy_id <= 0) {
       return NextResponse.json({ ok: false, error: "tenancy_id invalide" }, { status: 400 });
     }
     if (!Number.isFinite(new_rent) || new_rent < 0) {
@@ -31,7 +38,7 @@ export async function POST(req: NextRequest) {
 
     const odoo = new OdooClient();
 
-    // ---- 0) Lire l'ancienne adjustment_date sur la tenancy
+    // 0) Lire l’ancienne adjustment_date
     const tenRead = await odoo.executeKw<Array<{ id: number; adjustment_date: string | null }>>(
       "property.tenancy",
       "read",
@@ -39,7 +46,7 @@ export async function POST(req: NextRequest) {
     );
     const last_adjustment_prev: string | null = tenRead?.[0]?.adjustment_date ?? null;
 
-    // ---- 1) Trouver le dernier property.rent lié à cette tenancy
+    // 1) Dernier property.rent de la tenancy
     const rentIds = await odoo.executeKw<number[]>(
       "property.rent",
       "search",
@@ -54,7 +61,7 @@ export async function POST(req: NextRequest) {
     }
     const rentId = rentIds[0];
 
-    // ---- 2) Lire l'ancien rent pour tracker
+    // 2) Lire ancien rent
     const rentRec = await odoo.executeKw<Array<{ id: number; rent: number | null }>>(
       "property.rent",
       "read",
@@ -62,26 +69,33 @@ export async function POST(req: NextRequest) {
     );
     const old_rent = rentRec?.[0]?.rent ?? null;
 
-    // ---- 3) Write du nouveau rent
-    const wroteRent = await odoo.executeKw<boolean>(
+    // 3) Write nouveau rent
+    const wrote_rent = await odoo.executeKw<boolean>(
       "property.rent",
       "write",
       [[rentId], { rent: new_rent }]
     );
 
-    // ---- 4) Mettre à jour la last_adjustment_date = 1er du mois suivant
+    // 4) MAJ last_adjustment_date -> 1er du mois suivant
     const last_adjustment_new = firstDayOfNextMonthUTC();
-    const wroteAdj = await odoo.executeKw<boolean>(
+    const wrote_adjustment_date = await odoo.executeKw<boolean>(
       "property.tenancy",
       "write",
       [[tenancy_id], { adjustment_date: last_adjustment_new }]
     );
 
-    // ---- 5) Tracker Supabase (avec AM + opérateur + payload complet + dates prev/new)
+    // 5) Tracker Supabase
     const supabase = getServerSupabase();
 
-    const am_id = ui_row?.sales_person_id?.[0] ?? null;
-    const am_name = ui_row?.sales_person_id?.[1] ?? null;
+    // AM depuis la ligne UI si disponible
+    const am_id =
+      ui_row && Array.isArray((ui_row as Record<string, unknown>)["sales_person_id"])
+        ? (ui_row as Record<string, [number, string]>)["sales_person_id"]?.[0] ?? null
+        : null;
+    const am_name =
+      ui_row && Array.isArray((ui_row as Record<string, unknown>)["sales_person_id"])
+        ? (ui_row as Record<string, [number, string]>)["sales_person_id"]?.[1] ?? null
+        : null;
 
     const delta_abs =
       Number.isFinite(old_rent) && old_rent != null ? +(new_rent - Number(old_rent)).toFixed(2) : null;
@@ -117,27 +131,33 @@ export async function POST(req: NextRequest) {
       am_name,
       by_user_email,
       by_user_uuid,
-      payload, // 👈 contient last_adjustment_prev/new + row UI complète
+      payload,
     });
-    if (insErr) console.error("Supabase insert error:", insErr);
+    if (insErr) {
+      // on loggue mais on ne fail pas l’opération principale
+      // eslint-disable-next-line no-console
+      console.error("Supabase insert error:", insErr);
+    }
 
     return NextResponse.json({
       ok: true,
       tenancy_id,
       rent_record_id: rentId,
-      wrote_rent: wroteRent,
-      wrote_adjustment_date: wroteAdj,
+      wrote_rent,
+      wrote_adjustment_date,
       old_rent,
       new_rent,
       delta_abs,
       delta_pct,
       last_adjustment_prev,
-      last_adjustment_new, // 👈 renvoyé aussi dans la réponse
+      last_adjustment_new,
       am_id,
       am_name,
     });
-  } catch (e: any) {
+  } catch (e: unknown) {
+    // eslint-disable-next-line no-console
     console.error(e);
-    return NextResponse.json({ ok: false, error: String(e?.message || e) }, { status: 500 });
+    const msg = e instanceof Error ? e.message : String(e);
+    return NextResponse.json({ ok: false, error: msg }, { status: 500 });
   }
 }
