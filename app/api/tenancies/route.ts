@@ -118,9 +118,10 @@ interface PropertySales {
   sales_person_id?: OdooM2O | false | null;
 }
 
-const salesByProp = new Map<number, OdooM2O | null>(); // ← const OK (on mute la Map, pas la ref)
+const salesByProp = new Map<number, OdooM2O | null>(); // const ok
+
 if (propIds.length > 0) {
-  const props = await odoo.executeKw<PropertySales[]>(
+  const props = await odoo.executeKw<Array<{ id: number; sales_person_id?: OdooM2O | false | null }>>(
     "property.property",
     "read",
     [propIds, ["sales_person_id"]]
@@ -130,6 +131,7 @@ if (propIds.length > 0) {
     salesByProp.set(p.id, m2o);
   }
 }
+
 
 
   // Contexte temps

@@ -214,6 +214,12 @@ export default function IndexationsTablePage() {
 function Th({ children }: { children: React.ReactNode }) {
   return <th className="text-left p-2 text-[12px] uppercase tracking-wide text-gray-600">{children}</th>;
 }
-function Td({ children, className = "" }: { children: React.ReactNode; className?: string }) {
-  return <td className={`p-2 align-top ${className}`}>{children}</td>;
+function Td(
+  { children, className = "", ...rest }: React.PropsWithChildren<React.TdHTMLAttributes<HTMLTableCellElement>>
+) {
+  return (
+    <td className={`py-3 px-2 align-top ${className}`} {...rest}>
+      {children}
+    </td>
+  );
 }

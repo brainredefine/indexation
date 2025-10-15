@@ -134,8 +134,7 @@ export async function POST(req: NextRequest) {
       payload,
     });
     if (insErr) {
-      // on loggue mais on ne fail pas l’opération principale
-      // eslint-disable-next-line no-console
+
       console.error("Supabase insert error:", insErr);
     }
 
@@ -155,7 +154,7 @@ export async function POST(req: NextRequest) {
       am_name,
     });
   } catch (e: unknown) {
-    // eslint-disable-next-line no-console
+
     console.error(e);
     const msg = e instanceof Error ? e.message : String(e);
     return NextResponse.json({ ok: false, error: msg }, { status: 500 });
