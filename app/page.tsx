@@ -22,9 +22,8 @@ export default function Home() {
             href={`/${code}`}
             className="rounded-2xl border p-4 hover:shadow transition"
           >
-            <div className="text-sm text-gray-500">UID : {AM_UID[code]}</div>
             <div className="text-xl font-medium">{code}</div>
-            <div className="text-xs text-gray-500">Voir les indexations →</div>
+            <div className="text-xs text-gray-500">See your indexations →</div>
           </Link>
         ))}
 
@@ -33,9 +32,8 @@ export default function Home() {
           href="/no-am"
           className="rounded-2xl border p-4 hover:shadow transition"
         >
-          <div className="text-sm text-gray-500">Tous les AM</div>
-          <div className="text-xl font-medium">No AM</div>
-          <div className="text-xs text-gray-500">Voir toutes les indexations →</div>
+          <div className="text-xl font-medium">Everyone</div>
+          <div className="text-xs text-gray-500">See all indexations →</div>
         </Link>
       </div>
     </main>

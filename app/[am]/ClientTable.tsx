@@ -162,7 +162,7 @@ export default function ClientTable({ amSlug }: { amSlug: string }) {
         </h1>
         <label className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300">
           <input type="checkbox" checked={onlyEligible} onChange={(e) => setOnlyEligible(e.target.checked)} className="h-4 w-4" />
-          N’afficher que les éligibles
+          Only show indexable
         </label>
       </div>
 
@@ -178,24 +178,24 @@ export default function ClientTable({ amSlug }: { amSlug: string }) {
           >
             <thead>
               <tr>
-                <Th>Eligible</Th>
-                <Th>Bien</Th>
-                <Th>Tenancy</Th>
+                <Th>Indexable</Th>
+                <Th>Asset</Th>
+                <Th>Tenant</Th>
                 <Th>Index</Th>
                 <Th>Threshold</Th>
                 <Th>Lock</Th>
                 <Th className="min-w-[190px]">Last Adj.</Th> {/* élargie */}
                 <Th>Wait</Th>
-                <Th>I(adj)</Th>
-                <Th>I(cur)</Th>
+                <Th>Index(prev.)</Th>
+                <Th>Index(curr.)</Th>
                 <Th>Δ</Th>
-                <Th>PPP</Th>
+                <Th>Pass-Through</Th>
                 <Th>Cap</Th>
-                <Th>À appliquer</Th>
+                <Th>Applied</Th>
                 <Th>Old rent</Th>
                 <Th>New rent</Th>
-                <Th className="min-w-[180px]">Action</Th> {/* élargie */}
-                <Th className="min-w-[280px]">Raison / Next</Th> {/* élargie */}
+                <Th className="min-w-[180px]">Updating Rent</Th> {/* élargie */}
+                <Th className="min-w-[280px]">Reason (Debug)</Th> {/* élargie */}
               </tr>
             </thead>
 
@@ -214,7 +214,7 @@ export default function ClientTable({ amSlug }: { amSlug: string }) {
                             : "border-gray-300 text-gray-600 dark:text-gray-300"
                         )}
                       >
-                        {r.eligible_now ? "Oui" : "Non"}
+                        {r.eligible_now ? "Yes" : "No"}
                       </span>
                     </Td>
 
