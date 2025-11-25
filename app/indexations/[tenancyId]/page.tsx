@@ -2,11 +2,10 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "next/navigation";
 
 type M2O = [number, string] | null;
 
-// doit matcher /api/tenancies
+// must match /api/tenancies
 type TenancyRow = {
   id: number;
   name: string | null;
@@ -54,14 +53,14 @@ type IndexationFormState = {
 
   oldRent: number | null;
   newRent: number | null;
-  appliedPct: number | null; // décimal
+  appliedPct: number | null; // decimal
   effectiveDate: string; // "YYYY-MM-DD"
   comment: string;
 };
 
 function firstDayOfNextMonthLocal(now = new Date()): string {
   const y = now.getFullYear();
-  const m = now.getMonth(); // 0..11
+  const m = now.getMonth();
   const next = new Date(Date.UTC(y, m + 1, 1));
   const yyyy = next.getUTCFullYear();
   const mm = String(next.getUTCMonth() + 1).padStart(2, "0");
@@ -78,9 +77,6 @@ export default function IndexationDetailPage({
 }: {
   params: { tenancyId: string };
 }) {
-  const search = useSearchParams();
-  const am = search.get("am") || null;
-
   const tenancyId = useMemo(
     () => Number(params.tenancyId),
     [params.tenancyId]
@@ -104,7 +100,7 @@ export default function IndexationDetailPage({
   const [submitting, setSubmitting] = useState(false);
   const [lastInd, setLastInd] = useState<string | null>(null);
 
-  // ---------- Préremplissage depuis /api/tenancies ----------
+  // ---------- Prefill from /api/tenancies ----------
   useEffect(() => {
     if (!Number.isFinite(tenancyId)) return;
 
@@ -120,14 +116,14 @@ export default function IndexationDetailPage({
 
         const json: ApiPayload = await res.json();
         const row = json.items.find((r) => r.id === tenancyId);
-        if (!row) throw new Error("Tenancy introuvable dans /api/tenancies");
+        if (!row) throw new Error("Tenancy not found in /api/tenancies");
 
         const oldRent = row.current_rent ?? row.indexing_rent ?? null;
         const appliedPct = row.applied_percentage ?? null;
 
         const newRent =
           oldRent != null && appliedPct != null
-            ? +((oldRent as number) * (1 + (appliedPct as number))).toFixed(2)
+            ? +(oldRent * (1 + appliedPct)).toFixed(2)
             : null;
 
         if (cancelled) return;
@@ -158,7 +154,7 @@ export default function IndexationDetailPage({
     };
   }, [tenancyId]);
 
-  // ---------- Handlers formulaire ----------
+  // ---------- Form handlers ----------
   const handleChange = <K extends keyof IndexationFormState>(
     key: K,
     value: IndexationFormState[K]
@@ -197,34 +193,22 @@ export default function IndexationDetailPage({
       form.tenancyName ? `Tenancy: ${form.tenancyName}` : "",
       form.propertyLabel ? `Property: ${form.propertyLabel}` : "",
       form.tenant ? `Tenant: ${form.tenant}` : "",
-      `Ancien loyer: ${form.oldRent ?? "—"}`,
-      `Nouveau loyer: ${form.newRent ?? "—"}`,
-      `Augmentation: ${
+      `Old rent: ${form.oldRent ?? "—"}`,
+      `New rent: ${form.newRent ?? "—"}`,
+      `Increase: ${
         form.appliedPct != null ? (form.appliedPct * 100).toFixed(2) + "%" : "—"
       }`,
-      `Date d'effet: ${form.effectiveDate}`,
-      form.comment ? `Commentaire: ${form.comment}` : "",
-      am ? `AM: ${am}` : "",
+      `Effective date: ${form.effectiveDate}`,
+      form.comment ? `Comment: ${form.comment}` : "",
     ]
       .filter(Boolean)
       .join("\n");
-  }, [form, am]);
-
-  const handlePreviewLetter = () => {
-    console.log("Preview letter with data:", form, sourceRow);
-    alert("Preview texte brut à droite (et console si besoin).");
-  };
+  }, [form]);
 
   function downloadPdfFromBase64(b64: string, filename = "indexation.pdf") {
     const byteCharacters = atob(b64);
-    const byteNumbers = new Array(byteCharacters.length);
-    for (let i = 0; i < byteCharacters.length; i++) {
-      byteNumbers[i] = byteCharacters.charCodeAt(i);
-    }
-    const byteArray = new Uint8Array(byteNumbers.length);
-    for (let i = 0; i < byteNumbers.length; i++) {
-      byteArray[i] = byteNumbers[i];
-    }
+    const byteNumbers = Array.from(byteCharacters, (c) => c.charCodeAt(0));
+    const byteArray = new Uint8Array(byteNumbers);
     const blob = new Blob([byteArray], { type: "application/pdf" });
     const url = URL.createObjectURL(blob);
 
@@ -240,7 +224,7 @@ export default function IndexationDetailPage({
 
   const handleConfirm = async () => {
     if (!sourceRow) {
-      alert("Données de tenancy manquantes.");
+      alert("Missing tenancy data.");
       return;
     }
 
@@ -254,7 +238,7 @@ export default function IndexationDetailPage({
       appliedPct == null ||
       !form.effectiveDate
     ) {
-      alert("Complète ancien loyer, nouveau loyer, % et date d'effet.");
+      alert("Please fill old rent, new rent, % applied and effective date.");
       return;
     }
 
@@ -280,7 +264,7 @@ export default function IndexationDetailPage({
       const json = await res.json();
       if (!res.ok || !json.ok) {
         console.error("API error:", json);
-        alert(`Erreur : ${json.error ?? res.status}`);
+        alert(`Error: ${json.error ?? res.status}`);
         return;
       }
 
@@ -293,19 +277,25 @@ export default function IndexationDetailPage({
         );
       }
 
-      alert(`Indexation enregistrée.\nIND: ${json.ind ?? "—"}`);
+      alert(`Indexation saved.\nIND: ${json.ind ?? "—"}`);
     } catch (e: any) {
       console.error(e);
-      alert(`Erreur inattendue: ${e?.message ?? String(e)}`);
+      alert(`Unexpected error: ${e?.message ?? String(e)}`);
     } finally {
       setSubmitting(false);
     }
   };
 
+    const handleBackToList = () => {
+    if (typeof window !== "undefined") {
+        window.location.href = "/NO-AM";
+    }
+    };
+
   if (!Number.isFinite(tenancyId)) {
     return (
       <div className="p-6 text-sm text-red-600">
-        Tenancy ID invalide.
+        Invalid tenancy ID.
       </div>
     );
   }
@@ -313,7 +303,7 @@ export default function IndexationDetailPage({
   if (loading) {
     return (
       <div className="p-6 text-sm text-gray-800">
-        Chargement…
+        Loading…
       </div>
     );
   }
@@ -321,7 +311,7 @@ export default function IndexationDetailPage({
   if (loadError) {
     return (
       <div className="p-6 text-sm text-red-600">
-        Erreur de chargement: {loadError}
+        Loading error: {loadError}
       </div>
     );
   }
@@ -330,37 +320,41 @@ export default function IndexationDetailPage({
     <main className="min-h-screen w-full bg-gray-100 p-6">
       <div className="max-w-3xl mx-auto space-y-6">
         {/* Header */}
-        <header className="space-y-1">
-          <h1 className="text-2xl font-semibold text-gray-900">
-            Indexation tenancy #{form.tenancyId}
-          </h1>
+        <header className="flex items-start justify-between gap-4">
+          <div className="space-y-1">
+            <h1 className="text-2xl font-semibold text-gray-900">
+              Indexation for tenancy #{form.tenancyId}
+            </h1>
 
-          {am && (
-            <p className="text-xs text-gray-700">
-              AM : <span className="font-mono">{am}</span>
-            </p>
-          )}
+            {form.propertyLabel && (
+              <p className="text-xs text-gray-700">
+                Property: {form.propertyLabel}
+              </p>
+            )}
 
-          {form.propertyLabel && (
-            <p className="text-xs text-gray-700">
-              Bien : {form.propertyLabel}
-            </p>
-          )}
+            {lastInd && (
+              <p className="text-xs text-emerald-700">
+                Last IND generated:{" "}
+                <span className="font-mono">{lastInd}</span>
+              </p>
+            )}
+          </div>
 
-          {lastInd && (
-            <p className="text-xs text-emerald-700">
-              Dernier IND généré :{" "}
-              <span className="font-mono">{lastInd}</span>
-            </p>
-          )}
+          <button
+            type="button"
+            onClick={handleBackToList}
+            className="px-3 py-1.5 rounded-lg border border-gray-500 bg-white text-xs font-medium text-gray-900 hover:bg-gray-100"
+          >
+            Back to indexation list
+          </button>
         </header>
 
-        {/* Bloc formulaire principal */}
+        {/* Main form block */}
         <section className="space-y-4 rounded-2xl border border-gray-300 bg-white p-4 shadow-sm">
           <div className="grid grid-cols-2 gap-4 text-sm">
             <div>
               <label className="block text-xs text-gray-700 mb-1">
-                Ancien loyer (netto)
+                Old rent (net)
               </label>
               <input
                 type="number"
@@ -377,7 +371,7 @@ export default function IndexationDetailPage({
 
             <div>
               <label className="block text-xs text-gray-700 mb-1">
-                Nouveau loyer (netto)
+                New rent (net)
               </label>
               <input
                 type="number"
@@ -389,7 +383,7 @@ export default function IndexationDetailPage({
 
             <div>
               <label className="block text-xs text-gray-700 mb-1">
-                % appliqué
+                % applied
               </label>
               <div className="flex items-center gap-1">
                 <input
@@ -404,7 +398,7 @@ export default function IndexationDetailPage({
 
             <div>
               <label className="block text-xs text-gray-700 mb-1">
-                Date d&apos;effet
+                Effective date
               </label>
               <input
                 type="date"
@@ -417,7 +411,7 @@ export default function IndexationDetailPage({
 
           <div className="mt-4">
             <label className="block text-xs text-gray-700 mb-1">
-              Commentaire d&apos;indexation
+              Indexation comment
             </label>
             <textarea
               className="w-full border border-gray-400 rounded px-2 py-1 text-sm text-gray-900 min-h-[80px]"
@@ -430,28 +424,18 @@ export default function IndexationDetailPage({
         {/* Preview + actions */}
         <section className="grid grid-cols-1 gap-4 md:grid-cols-2">
           <div className="rounded-2xl border border-gray-300 bg-white p-4 shadow-sm text-xs whitespace-pre-wrap text-gray-900">
-            <div className="font-semibold mb-2">Preview texte brut</div>
+            <div className="font-semibold mb-2">Plain text preview</div>
             {previewText}
           </div>
 
           <div className="flex flex-col gap-3">
             <button
               type="button"
-              onClick={handlePreviewLetter}
-              className="px-3 py-2 rounded-lg border border-gray-500 bg-white text-sm text-gray-900 hover:bg-gray-100"
-            >
-              Preview indexation letter
-            </button>
-
-            <button
-              type="button"
               onClick={handleConfirm}
               disabled={submitting}
               className="px-3 py-2 rounded-lg bg-black text-white text-sm disabled:opacity-50"
             >
-              {submitting
-                ? "Enregistrement en cours..."
-                : "Confirmer l'indexation"}
+              {submitting ? "Saving indexation…" : "Confirm indexation"}
             </button>
           </div>
         </section>
