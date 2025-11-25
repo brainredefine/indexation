@@ -1,38 +1,40 @@
 // app/api/tenancies/route.ts
 import { NextResponse } from "next/server";
 import { OdooClient, OdooM2O, m2oId } from "@/lib/odoo";
-import { germanIndexMonthly,germanIndexYearly } from "@/lib/indexationData";
+import { germanIndexMonthly, germanIndexYearly } from "@/lib/indexationData";
 import { parseToMonthKey, prevMonthKey, addMonths } from "@/lib/dateKeys";
 
 type TenancyRec = {
   id: number;
   name?: string | null;
   main_property_id?: OdooM2O | false | null;
-  indexing_rent?: number | null;
-  current_rent?: number | null;  
+  indexing_rent?: number | null; // tu l'avais déjà, je le laisse si utile ailleurs
+  current_rent?: number | null;
   index_id?: OdooM2O | false | null;
   lock_date?: string | null;
   adjustment_period?: string | number | null;
   adjustment_date?: string | null;
-  threshold?: number | null;                // décimal (ex 0.02)
+  threshold?: number | null; // décimal (ex 0.02)
   partially_passing_on?: number | boolean | null; // décimal ou bool
-  maximal_percentage?: number | null;       // décimal (0 = pas de plafond)
-  waiting_time?: number | null;             // en mois
+  maximal_percentage?: number | null; // décimal (0 = pas de plafond)
+  waiting_time?: number | null; // en mois
+  date_end_display?: string | null;
+  is_indexing_rent?: boolean | number | string | null; // ⬅️ important
 };
 
-type PropertySales = {
-  id: number;
-  sales_person_id?: OdooM2O | false | null;
-};
-
-type IndexKind = "VPI" | "VPI - Annual" | "VPI Automatic" | "VPI Automatic - Annual" | "Other";
+type IndexKind =
+  | "VPI"
+  | "VPI - Annual"
+  | "VPI Automatic"
+  | "VPI Automatic - Annual"
+  | "Other";
 
 export const dynamic = "force-dynamic";
 
 // ---- helpers index ----
 function detectIndexKind(name?: string | null): IndexKind {
   const n = (name || "").toLowerCase().trim();
-  if (n === "vpi") return "VPI";
+  if (n === "VPI".toLowerCase()) return "VPI";
   if (n === "vpi - annual") return "VPI - Annual";
   if (n === "vpi automatic") return "VPI Automatic";
   if (n === "vpi automatic - annual") return "VPI Automatic - Annual";
@@ -41,12 +43,16 @@ function detectIndexKind(name?: string | null): IndexKind {
 
 function getMonthlyIndex(key: string | null): number | null {
   if (!key) return null;
-  return Number.isFinite(germanIndexMonthly[key]) ? germanIndexMonthly[key] : null;
+  return Number.isFinite(germanIndexMonthly[key])
+    ? germanIndexMonthly[key]
+    : null;
 }
 
 function getAnnualIndex(yearStr: string | null): number | null {
   if (!yearStr) return null;
-  return Number.isFinite(germanIndexYearly[yearStr]) ? germanIndexYearly[yearStr] : null;
+  return Number.isFinite(germanIndexYearly[yearStr])
+    ? germanIndexYearly[yearStr]
+    : null;
 }
 
 function adjustmentYearKeyFromDateStr(d: string | null | undefined): string | null {
@@ -81,6 +87,17 @@ function capIncrease(val: number, cap?: number | null): number {
   return Math.min(val, cap);
 }
 
+// helper pour interpréter is_indexing_rent venant d'Odoo
+function isIndexingRentActive(v: boolean | number | string | null | undefined): boolean {
+  if (typeof v === "boolean") return v;
+  if (typeof v === "number") return v !== 0;
+  if (typeof v === "string") {
+    const s = v.trim().toLowerCase();
+    return s === "1" || s === "true" || s === "yes" || s === "y";
+  }
+  return false;
+}
+
 export async function GET() {
   const odoo = new OdooClient();
 
@@ -97,8 +114,11 @@ export async function GET() {
     "partially_passing_on",
     "maximal_percentage",
     "waiting_time",
+    "date_end_display",
+    "is_indexing_rent", // ⬅️ on le lit depuis Odoo
   ] as const;
 
+  // 1) Lire toutes les tenancies
   const tenancies = await odoo.searchRead<TenancyRec>(
     "property.tenancy",
     [],
@@ -106,42 +126,68 @@ export async function GET() {
     20000
   );
 
-  // Join sales_person_id
+  // 2) Récupérer les biens liés
   const propIds = Array.from(
-    new Set(tenancies.map((t) => m2oId(t.main_property_id)).filter((x): x is number => !!x))
+    new Set(
+      tenancies
+        .map((t) => m2oId(t.main_property_id))
+        .filter((x): x is number => !!x)
+    )
   );
 
- // types utiles
-type OdooM2O = [number, string];
-interface PropertySales {
-  id: number;
-  sales_person_id?: OdooM2O | false | null;
-}
+  // Maps: property_id -> sales_person, et property_id -> "est dans Fund IV/Eagle"
+  const salesByProp = new Map<number, OdooM2O | null>();
+  const allowedCompanyByProp = new Set<number>();
 
-const salesByProp = new Map<number, OdooM2O | null>(); // const ok
+  if (propIds.length > 0) {
+    const props = await odoo.executeKw<
+      Array<{
+        id: number;
+        sales_person_id?: OdooM2O | false | null;
+        company_id?: OdooM2O | false | null;
+      }>
+    >("property.property", "read", [propIds, ["sales_person_id", "company_id"]]);
 
-if (propIds.length > 0) {
-  const props = await odoo.executeKw<Array<{ id: number; sales_person_id?: OdooM2O | false | null }>>(
-    "property.property",
-    "read",
-    [propIds, ["sales_person_id"]]
-  );
-  for (const p of props) {
-    const m2o = (p.sales_person_id ?? null) as OdooM2O | null;
-    salesByProp.set(p.id, m2o);
+    for (const p of props) {
+      const sales = (p.sales_person_id ?? null) as OdooM2O | null;
+      const company = (p.company_id ?? null) as OdooM2O | null;
+
+      salesByProp.set(p.id, sales);
+
+      const companyName = company && company[1] ? String(company[1]) : "";
+      if (companyName === "Fund IV" || companyName === "Eagle") {
+        allowedCompanyByProp.add(p.id);
+      }
+    }
   }
-}
 
+  // 3) Filtrer les tenancies: company_id ∈ {"Fund IV", "Eagle"}
+  const byCompanyTenancies = tenancies.filter((t) => {
+    const pid = m2oId(t.main_property_id);
+    if (!pid) return false;
+    return allowedCompanyByProp.has(pid);
+  });
 
+  // 3bis) Enlever les tenants "Vacant" (case-insensitive)
+  const nonVacantTenancies = byCompanyTenancies.filter((t) => {
+    const name = (t.name || "").toLowerCase();
+    return !name.includes("vacant");
+  });
 
-  // Contexte temps
+  // 3ter) Garder uniquement ceux avec is_indexing_rent actif
+  const filteredTenancies = nonVacantTenancies.filter((t) =>
+    isIndexingRentActive(t.is_indexing_rent)
+  );
+
+  // 4) Contexte temps
   const now = new Date(); // Europe/Paris côté runtime
   const currentMonthKey = prevMonthKey(now);
   const currentAnnual = currentAnnualKey(now);
   const currentMonthlyIndex = getMonthlyIndex(currentMonthKey);
   const currentYearlyIndex = getAnnualIndex(currentAnnual);
 
-  const items = tenancies.map((t) => {
+  // 5) Calcul des items
+  const items = filteredTenancies.map((t) => {
     const mpId = m2oId(t.main_property_id);
     const sales = mpId ? salesByProp.get(mpId) ?? null : null;
 
@@ -343,6 +389,7 @@ if (propIds.length > 0) {
 
   return NextResponse.json({ count: items.length, items });
 
+  // ---- helper local ----
   function baseOut(t: TenancyRec, sales: OdooM2O | null) {
     const index_name = Array.isArray(t.index_id) ? String(t.index_id[1]) : null;
     return {
@@ -351,19 +398,23 @@ if (propIds.length > 0) {
       main_property_id: t.main_property_id ?? null,
       sales_person_id: sales,
       indexing_rent: t.indexing_rent ?? null,
-      current_rent: t.current_rent ?? null, 
+      current_rent: t.current_rent ?? null,
       index_id: t.index_id ?? null,
       index_name,
       lock_date: t.lock_date ?? null,
       adjustment_period: t.adjustment_period ?? null,
       adjustment_date: t.adjustment_date ?? null,
       threshold: t.threshold ?? null,
-      partially_passing_on: typeof t.partially_passing_on === "boolean"
-        ? (t.partially_passing_on ? 1 : 0)
-        : (t.partially_passing_on ?? 1),
+      partially_passing_on:
+        typeof t.partially_passing_on === "boolean"
+          ? t.partially_passing_on
+            ? 1
+            : 0
+          : t.partially_passing_on ?? 1,
       maximal_percentage: t.maximal_percentage ?? 0,
       waiting_time: t.waiting_time ?? 0,
       blocked_by_lock: false,
+      date_end_display: t.date_end_display ?? null,
     };
   }
 }

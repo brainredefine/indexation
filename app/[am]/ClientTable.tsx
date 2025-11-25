@@ -42,8 +42,13 @@ type ApiPayload = { count: number; items: TenancyRow[] };
 const AM_UID: Record<string, number> = { BKO: 8, CFR: 12, FKE: 7, MSC: 9 };
 
 const cls = (...s: (string | false | undefined)[]) => s.filter(Boolean).join(" ");
-const fmtPct = (x: number | null | undefined) => (x == null ? "—" : `${(x * 100).toFixed(2)}%`);
+
+// fmtPct configurable : par défaut 2 décimales, mais on peut mettre 0
+const fmtPct = (x: number | null | undefined, decimals: number = 2) =>
+  x == null ? "—" : `${(x * 100).toFixed(decimals)}%`;
+
 const m2oName = (v: M2O) => (v && v[1]) || "—";
+
 const fmtMoney = (n: number | null | undefined) =>
   n == null
     ? "—"
@@ -55,11 +60,20 @@ const fmtMoney = (n: number | null | undefined) =>
 
 function Th({ children, className = "" }: { children: React.ReactNode; className?: string }) {
   return (
-    <th className={cls("text-left text-[12px] uppercase tracking-wide text-gray-500 py-2", className)}>
+    <th
+      className={cls(
+        "text-left text-[12px] uppercase tracking-wide py-2.5 px-2",
+        "bg-gray-100",
+        "text-gray-900",
+        "border-b border-gray-300",
+        className
+      )}
+    >
       {children}
     </th>
   );
 }
+
 function Td({
   children,
   className = "",
@@ -70,7 +84,13 @@ function Td({
   title?: string;
 }) {
   return (
-    <td className={cls("py-3 align-top text-[13px] text-gray-800 dark:text-gray-100", className)} title={title}>
+    <td
+      className={cls(
+        "py-3 px-2 align-top text-[13px] text-gray-900",
+        className
+      )}
+      title={title}
+    >
       {children}
     </td>
   );
@@ -128,53 +148,41 @@ export default function ClientTable({ amSlug }: { amSlug: string }) {
   const canUpdate = (r: TenancyRow) =>
     Boolean(r.eligible_now && r.current_rent != null && r.applied_percentage != null && calcNewRent(r) != null);
 
-  const handleUpdate = async (r: TenancyRow) => {
-    const newRent = calcNewRent(r);
-    if (!canUpdate(r) || newRent == null) return;
-    try {
-      setBusyId(r.id);
-      const res = await fetch("/api/update-rent", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tenancy_id: r.id, new_rent: newRent, ui_row: r }),
-      });
-      const json = await res.json();
-      if (!json.ok) {
-        alert("Odoo update failed: " + (json.error || "unknown"));
-        return;
-      }
-      await refresh();
-      alert(`Rent mis à jour (tenancy ${r.id}).`);
-    } catch (e: unknown) {
-      console.error(e);
-      const msg = e instanceof Error ? e.message : String(e);
-      alert("Erreur: " + msg);
-    } finally {
-      setBusyId(null);
-    }
+  const handleOpenIndexation = (r: TenancyRow) => {
+    if (!canUpdate(r)) return;
+
+    const base = `/indexations/${r.id}`;
+    const url = amSlug ? `${base}?am=${encodeURIComponent(amSlug)}` : base;
+
+    window.open(url, "_blank", "noopener,noreferrer");
   };
 
   return (
-    <main className="p-6 max-w-[1400px] mx-auto">
+    <main className="p-6 w-full bg-gray-100">
       <div className="mb-5 flex items-center justify-between gap-4">
-        <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
+        <h1 className="text-xl font-semibold text-gray-900">
           Indexations — {isNoAM ? "No AM (tous)" : amSlug}
         </h1>
-        <label className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300">
-          <input type="checkbox" checked={onlyEligible} onChange={(e) => setOnlyEligible(e.target.checked)} className="h-4 w-4" />
+        <label className="flex items-center gap-2 text-sm text-gray-900">
+          <input
+            type="checkbox"
+            checked={onlyEligible}
+            onChange={(e) => setOnlyEligible(e.target.checked)}
+            className="h-4 w-4 rounded border-gray-400 text-emerald-600 focus:ring-emerald-500"
+          />
           Only show indexable
         </label>
       </div>
 
       {loading ? (
-        <div className="text-sm text-gray-500">Chargement…</div>
+        <div className="text-sm text-gray-800">Chargement…</div>
       ) : rows.length === 0 ? (
-        <div className="text-sm text-gray-500">Aucune ligne.</div>
+        <div className="text-sm text-gray-800">Aucune ligne.</div>
       ) : (
-        <div className="rounded-2xl border border-gray-200 dark:border-gray-800 overflow-x-auto">
+        <div className="w-full rounded-2xl border border-gray-300 bg-white shadow-sm overflow-x-auto">
           <table
             className="w-full text-sm tabular-nums"
-            style={{ borderCollapse: "separate", borderSpacing: "28px 0" }}
+            style={{ borderCollapse: "separate", borderSpacing: "0 0" }}
           >
             <thead>
               <tr>
@@ -184,7 +192,7 @@ export default function ClientTable({ amSlug }: { amSlug: string }) {
                 <Th>Index</Th>
                 <Th>Threshold</Th>
                 <Th>Lock</Th>
-                <Th className="min-w-[190px]">Last Adj.</Th> {/* élargie */}
+                <Th className="min-w-[120px]">Last Adj.</Th>
                 <Th>Wait</Th>
                 <Th>Index(prev.)</Th>
                 <Th>Index(curr.)</Th>
@@ -194,24 +202,32 @@ export default function ClientTable({ amSlug }: { amSlug: string }) {
                 <Th>Applied</Th>
                 <Th>Old rent</Th>
                 <Th>New rent</Th>
-                <Th className="min-w-[180px]">Updating Rent</Th> {/* élargie */}
-                <Th className="min-w-[280px]">Reason (Debug)</Th> {/* élargie */}
+                <Th className="min-w-[180px]">Updating Rent</Th>
+                <Th className="min-w-[280px]">Reason (Debug)</Th>
               </tr>
             </thead>
 
             <tbody>
-              {rows.map((r) => {
+              {rows.map((r, idx) => {
                 const newRent = calcNewRent(r);
+                const isEven = idx % 2 === 0;
 
                 return (
-                  <tr key={r.id}>
+                  <tr
+                    key={r.id}
+                    className={cls(
+                      isEven ? "bg-white" : "bg-gray-50",
+                      "hover:bg-emerald-50/50",
+                      "transition-colors"
+                    )}
+                  >
                     <Td>
                       <span
                         className={cls(
                           "inline-flex items-center rounded-full px-2 py-0.5 text-xs border",
                           r.eligible_now
-                            ? "border-emerald-300 text-emerald-700 dark:text-emerald-400"
-                            : "border-gray-300 text-gray-600 dark:text-gray-300"
+                            ? "border-emerald-500 text-emerald-700"
+                            : "border-gray-500 text-gray-800"
                         )}
                       >
                         {r.eligible_now ? "Yes" : "No"}
@@ -226,27 +242,19 @@ export default function ClientTable({ amSlug }: { amSlug: string }) {
                       {r.name ?? "—"}
                     </Td>
 
-                    <Td>
-                      <div className="leading-tight">
-                        <div className="font-medium">{r.index_name ?? "—"}</div>
-                        <div className="text-[11px] text-gray-500 dark:text-gray-400">{r.index_kind ?? ""}</div>
-                      </div>
-                    </Td>
+                    <Td className="whitespace-nowrap">{r.index_name ?? "—"}</Td>
 
-                    <Td>{fmtPct(r.threshold ?? null)}</Td>
+                    {/* Threshold : pas de décimales */}
+                    <Td>{fmtPct(r.threshold ?? null, 0)}</Td>
+
                     <Td>{r.lock_date ?? "—"}</Td>
 
-                    {/* Last Adj. — large + wrap autorisé */}
+                    {/* Last Adj. — plus étroite + juste MM/YYYY ou YYYY */}
                     <Td
-                      className="min-w-[190px] whitespace-normal break-words"
-                      title={r.adjustment_month_key || r.adjustment_year_key || undefined}
+                      className="min-w-[120px] whitespace-nowrap"
+                      title={r.adjustment_month_key || r.adjustment_year_key || r.adjustment_date || undefined}
                     >
-                      <div className="leading-tight">
-                        <div>{r.adjustment_date ?? "—"}</div>
-                        <div className="text-[11px] text-gray-500 dark:text-gray-400">
-                          {r.adjustment_month_key || r.adjustment_year_key || "—"}
-                        </div>
-                      </div>
+                      {r.adjustment_month_key || r.adjustment_year_key || "—"}
                     </Td>
 
                     <Td className="text-center">{r.waiting_time ?? 0}</Td>
@@ -257,49 +265,46 @@ export default function ClientTable({ amSlug }: { amSlug: string }) {
                     <Td
                       className={cls(
                         (r.delta ?? 0) > 0
-                          ? "text-emerald-700 dark:text-emerald-400"
+                          ? "text-emerald-700"
                           : (r.delta ?? 0) < 0
-                          ? "text-rose-700 dark:text-rose-400"
-                          : "text-gray-700 dark:text-gray-200",
+                          ? "text-rose-700"
+                          : "text-gray-900",
                         "font-medium"
                       )}
                     >
                       {fmtPct(r.delta ?? null)}
                     </Td>
 
-                    <Td>{fmtPct(r.partially_passing_on ?? null)}</Td>
+                    {/* Pass-Through : pas de décimales */}
+                    <Td>{fmtPct(r.partially_passing_on ?? null, 0)}</Td>
+
                     <Td>{fmtPct((r.maximal_percentage ?? 0) || null)}</Td>
                     <Td className="font-semibold">{fmtPct(r.applied_percentage ?? null)}</Td>
 
                     <Td>{fmtMoney(r.current_rent)}</Td>
                     <Td>{fmtMoney(newRent)}</Td>
 
-                    {/* Action — large */}
-                    <Td className="min-w-[180px]">
+                    <Td>
                       <button
+                        type="button"
+                        onClick={() => handleOpenIndexation(r)}
                         disabled={!canUpdate(r) || busyId === r.id}
-                        onClick={() => handleUpdate(r)}
-                        className={cls(
-                          "rounded-lg px-3 py-1.5 text-xs font-medium border transition",
-                          canUpdate(r) && busyId !== r.id
-                            ? "border-gray-300 text-gray-800 hover:bg-black/5 dark:text-gray-100 dark:border-gray-700 dark:hover:bg-white/5"
-                            : "border-gray-200 text-gray-400 cursor-not-allowed dark:border-gray-800"
-                        )}
-                        title={!canUpdate(r) ? "Non éligible ou données manquantes" : "Mettre à jour dans Odoo"}
+                        className="px-2 py-1 rounded border border-gray-500 text-xs text-gray-900 bg-white hover:bg-gray-100 disabled:opacity-40"
                       >
-                        {busyId === r.id ? "Mise à jour…" : "Update new rent"}
+                        Open indexation panel
                       </button>
                     </Td>
 
-                    {/* Raison — large + wrap */}
                     <Td className="min-w-[280px] whitespace-normal break-words">
                       <div className="leading-tight">
-                        <div className="text-[11px] text-gray-500 dark:text-gray-400">
+                        <div className="text-[11px] text-gray-700">
                           cur: {r.current_month_key || r.current_year_key || "—"}
                         </div>
                         <div>{r.reason || "—"}</div>
                         {r.next_wait_date && (
-                          <div className="text-[11px] text-gray-500 dark:text-gray-400">next: {r.next_wait_date}</div>
+                          <div className="text-[11px] text-gray-700">
+                            next: {r.next_wait_date}
+                          </div>
                         )}
                       </div>
                     </Td>
@@ -310,7 +315,7 @@ export default function ClientTable({ amSlug }: { amSlug: string }) {
 
             <tfoot>
               <tr>
-                <td colSpan={18} className="h-px bg-gray-200/60 dark:bg-gray-800/60" />
+                <td colSpan={18} className="h-px bg-gray-300" />
               </tr>
             </tfoot>
           </table>

@@ -81,6 +81,7 @@ export const germanIndexMonthly: Record<string, number> = {
   "07/2025": 122.2,
   "08/2025": 122.3,
   "09/2025": 122.6,
+  "10/2025": 124.0,
 };
 
 export default germanIndexMonthly;
