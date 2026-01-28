@@ -333,47 +333,16 @@ export async function POST(req: NextRequest) {
         : null;
 
     let ancillary_vat_rate: 0 | 19 | null = null;
+    
+    // On lit directement le nom du M2O ancillary_cost_type_id
     if (tenancyRec.ancillary_cost_type_id && Array.isArray(tenancyRec.ancillary_cost_type_id)) {
-      const ancTypeId = tenancyRec.ancillary_cost_type_id[0];
-
-      const ancTypes = await odoo.executeKw<
-        Array<{
-          id: number;
-          product_id?: [number, string] | false | null;
-        }>
-      >("tenancy.ancillary.cost.type", "read", [[ancTypeId], ["product_id"]]);
-
-      const ancType = ancTypes?.[0];
-      if (ancType && ancType.product_id && Array.isArray(ancType.product_id)) {
-        const ancProdId = ancType.product_id[0];
-
-        const ancProds = await odoo.executeKw<
-          Array<{
-            id: number;
-            taxes_id?: number[] | false | null;
-          }>
-        >("product.product", "read", [[ancProdId], ["taxes_id"]]);
-
-        const ancProd = ancProds?.[0];
-        if (ancProd && Array.isArray(ancProd.taxes_id) && ancProd.taxes_id.length > 0) {
-          const ancTaxes = await odoo.executeKw<
-            Array<{
-              id: number;
-              amount_type?: string | null;
-              amount?: number | null;
-            }>
-          >("account.tax", "read", [ancProd.taxes_id, ["amount_type", "amount"]]);
-
-          const ancTax = ancTaxes.find((t) => t.amount_type === "percent");
-          if (ancTax && typeof ancTax.amount === "number") {
-            // On ne garde que 0 ou 19, sinon null
-            if (Math.abs(ancTax.amount - 0) < 0.01) {
-              ancillary_vat_rate = 0;
-            } else if (Math.abs(ancTax.amount - 19) < 0.01) {
-              ancillary_vat_rate = 19;
-            }
-          }
-        }
+      const ancTypeName = String(tenancyRec.ancillary_cost_type_id[1] || "").toLowerCase();
+      
+      // On cherche "19" ou "0" dans le nom
+      if (ancTypeName.includes("19")) {
+        ancillary_vat_rate = 19;
+      } else if (ancTypeName.includes("0") || ancTypeName.includes("zero")) {
+        ancillary_vat_rate = 0;
       }
     }
 
