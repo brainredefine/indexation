@@ -7,7 +7,6 @@ import path from "path";
 export type IndexationPdfParams = {
   ind: string | null;
   tenancy_id: number;
-
   tenant: string | null;
   property_label: string | null;
   address: string | null; // multiligne avec \n
@@ -156,6 +155,7 @@ export async function generateIndexationPdf(
 
   const leftMargin = 60;
   const maxWidth = width - leftMargin * 2;
+
   const dateStr = formatDateGerman(effective_date);
 
   // Top de la zone de texte :
@@ -194,13 +194,12 @@ export async function generateIndexationPdf(
 
     const lineHeight = fontSize + 4;
     let currentWords: string[] = [];
-
     const spaceWidth = font.widthOfTextAtSize(" ", fontSize);
 
     function drawLine(lineWords: string[], isLast: boolean) {
       if (lineWords.length === 0) return;
-
       ensureSpace(120);
+
       const yLine = y;
 
       if (isLast || lineWords.length === 1) {
@@ -264,28 +263,28 @@ export async function generateIndexationPdf(
   // ---------------------------------------------------------------------------
   const addrLines: string[] = [];
   if (tenant) addrLines.push(tenant);
-
   if (address) {
     for (const l of address.split("\n")) {
       if (l.trim()) addrLines.push(l.trim());
     }
   }
-
   for (const line of addrLines) {
     ensureSpace(80);
     page.drawText(line, { x: leftMargin, y, size: 10, font });
     y -= 14;
   }
+
   y -= 40;
 
   // ---------------------------------------------------------------------------
-  // Berlin + date – plus bas, plus à gauche, Titillium 9
+  // Berlin + date – À GAUCHE MAINTENANT
   // ---------------------------------------------------------------------------
   ensureSpace(120);
   const dateText = `Berlin, ${dateStr}`;
-  const dateWidth = font.widthOfTextAtSize(dateText, 9);
-  const dateX = width - leftMargin - dateWidth - 54;
-
+  
+  // ✅ CHANGEMENT ICI : on met le texte à gauche
+  const dateX = leftMargin;
+  
   page.drawText(dateText, {
     x: dateX,
     y,
@@ -310,6 +309,7 @@ export async function generateIndexationPdf(
     page.drawText(line, { x: leftMargin, y, size: 10, font: fontBold });
     y -= 14;
   }
+
   y -= 20;
 
   // ---------------------------------------------------------------------------
@@ -342,6 +342,7 @@ export async function generateIndexationPdf(
 
     const idxPrevLabel = index_prev_label ?? "bisher";
     const idxCurLabel = index_cur_label ?? "neu";
+
     const idxDelta =
       index_delta ??
       (index_prev_value && index_cur_value
@@ -357,6 +358,7 @@ export async function generateIndexationPdf(
     y -= 18;
 
     const labelWidth = 260;
+
     const idxLines: Array<[string, string]> = [
       [
         `Indexstand bisher (${idxPrevLabel})`,
@@ -373,6 +375,7 @@ export async function generateIndexationPdf(
         }),
       ],
     ];
+
     if (idxDelta != null) {
       idxLines.push(["Veränderung", formatPercentDE1(idxDelta)]);
     }
@@ -427,13 +430,14 @@ export async function generateIndexationPdf(
   const oldStr = formatCurrencyDE(old_rent);
   const deltaStr = formatCurrencyDE(rentDeltaAbs);
   const newStr = formatCurrencyDE(new_rent);
+
   const newRentBrutto = is_gross_19 ? new_rent * 1.19 : null;
   const newBruttoStr =
     newRentBrutto != null ? formatCurrencyDE(newRentBrutto) : null;
 
   y -= 10;
-
   ensureSpace(180);
+
   page.drawText(
     `Die Miete für Ihre Mietfläche setzt sich ab dem ${dateStr} wie folgt zusammen:`,
     { x: leftMargin, y, size: 10, font: fontBold, maxWidth }
@@ -487,8 +491,8 @@ export async function generateIndexationPdf(
         : null;
 
     y -= 12;
-
     ensureSpace(180);
+
     page.drawText("Nebenkosten / Betriebskosten:", {
       x: leftMargin,
       y,
