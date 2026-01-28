@@ -230,132 +230,166 @@ export async function POST(req: NextRequest) {
           id: number;
           name: string;
           commercial_partner_id?: [number, string] | false | null;
-          street?: string | null;
-          zip?: string | null;
-          city?: string | null;
-          country_id?: [number, string] | false | null;
         }>
-      >("res.partner", "read", [
-        [partnerId],
-        [
-          "name",
-          "commercial_partner_id",
-          "street",
-          "zip",
-          "city",
-          "country_id",
-        ],
-      ]);
+      >("res.partner", "read", [[partnerId], ["name", "commercial_partner_id"]]);
 
-      const p = partners?.[0];
-      if (p) {
-        let cpId = p.id;
-        let cpName: string | null = p.name;
-
-        if (p.commercial_partner_id && Array.isArray(p.commercial_partner_id)) {
-          cpId = p.commercial_partner_id[0];
-          cpName = String(p.commercial_partner_id[1] ?? p.name);
+      const partnerRec = partners?.[0];
+      if (partnerRec) {
+        let commercialId: number | null = null;
+        if (partnerRec.commercial_partner_id && Array.isArray(partnerRec.commercial_partner_id)) {
+          commercialId = partnerRec.commercial_partner_id[0];
+        } else {
+          commercialId = partnerRec.id;
         }
 
-        const cpRes = await odoo.executeKw<
-          Array<{
-            id: number;
-            name: string;
-            street?: string | null;
-            zip?: string | null;
-            city?: string | null;
-            country_id?: [number, string] | false | null;
-          }>
-        >("res.partner", "read", [
-          [cpId],
-          ["name", "street", "zip", "city", "country_id"],
-        ]);
+        if (commercialId) {
+          const commercial = await odoo.executeKw<
+            Array<{
+              id: number;
+              name?: string | null;
+              street?: string | null;
+              street2?: string | null;
+              zip?: string | null;
+              city?: string | null;
+              country_id?: [number, string] | false | null;
+            }>
+          >("res.partner", "read", [
+            [commercialId],
+            ["name", "street", "street2", "zip", "city", "country_id"],
+          ]);
 
-        const cp = cpRes?.[0];
-        if (cp) {
-          tenantName = cp.name ?? cpName ?? null;
+          const comm = commercial?.[0];
+          if (comm) {
+            tenantName = comm.name ?? null;
 
-          const cpCountry =
-            cp.country_id && Array.isArray(cp.country_id)
-              ? cp.country_id[1]
-              : null;
+            const countryName =
+              comm.country_id && Array.isArray(comm.country_id) ? comm.country_id[1] : null;
 
-          // Adresse multi-lignes naturelle
-          const addrLines: string[] = [];
-          if (cp.street && cp.street.trim()) addrLines.push(cp.street.trim());
+            const addrParts = [
+              comm.street,
+              comm.street2,
+              comm.zip,
+              comm.city,
+              countryName,
+            ]
+              .filter((v) => typeof v === "string" && v.trim() !== "")
+              .join(", ");
 
-          const zipCity = `${cp.zip ?? ""} ${cp.city ?? ""}`.trim();
-          if (zipCity) addrLines.push(zipCity);
-
-          if (cpCountry && cpCountry.trim()) addrLines.push(cpCountry.trim());
-
-          if (addrLines.length > 0) {
-            tenantAddress = addrLines.join("\n");
+            if (addrParts) tenantAddress = addrParts;
           }
-        } else {
-          tenantName = cpName;
         }
       }
     }
 
-    // fallback tenantName si besoin
-    if (!tenantName) {
-      if (typeof ui_row?.tenant_name === "string") tenantName = ui_row.tenant_name;
-      else if (typeof ui_row?.tenant === "string") tenantName = ui_row.tenant;
-      else if (typeof ui_row?.name === "string") tenantName = ui_row.name;
-      else tenantName = tenancyNameForTenantNo;
-    }
-
     // ------------------------------------------------------------------
-    // 4) Type d'index + labels PDF
+    // 4) Label pour PDF
     // ------------------------------------------------------------------
-    let tenancyType: string | null = null;
-    if (typeof ui_row?.index_name === "string") tenancyType = ui_row.index_name;
-
     let propertyLabelForPdf: string | null = null;
-    if (Array.isArray(ui_row?.main_property_id)) {
-      propertyLabelForPdf = `${ui_row!.main_property_id[0]} — ${ui_row!.main_property_id[1]}`;
-    } else if (tenancyRec.main_property_id && Array.isArray(tenancyRec.main_property_id)) {
-      propertyLabelForPdf = `${tenancyRec.main_property_id[0]} — ${tenancyRec.main_property_id[1]}`;
+    if (tenancyRec.main_property_id && Array.isArray(tenancyRec.main_property_id)) {
+      propertyLabelForPdf = String(tenancyRec.main_property_id[1] ?? tenancyRec.main_property_id[0]);
     }
 
     // ------------------------------------------------------------------
-    // 5) VAT rent brutto condition
+    // 5) TVA Loyer
     // ------------------------------------------------------------------
     let isGross19 = false;
+
     if (tenancyRec.rent_product_id && Array.isArray(tenancyRec.rent_product_id)) {
-      const label = tenancyRec.rent_product_id[1];
-      if (label === "Miete Gewerblich 19%") isGross19 = true;
+      const rentProdId = tenancyRec.rent_product_id[0];
+
+      const rentProds = await odoo.executeKw<
+        Array<{
+          id: number;
+          taxes_id?: number[] | false | null;
+        }>
+      >("product.product", "read", [[rentProdId], ["taxes_id"]]);
+
+      const rentProd = rentProds?.[0];
+      if (rentProd) {
+        const taxIds = rentProd.taxes_id;
+        if (Array.isArray(taxIds) && taxIds.length > 0) {
+          const taxes = await odoo.executeKw<
+            Array<{
+              id: number;
+              amount_type?: string | null;
+              amount?: number | null;
+            }>
+          >("account.tax", "read", [taxIds, ["amount_type", "amount"]]);
+
+          const tax19 = taxes.find(
+            (t) => t.amount_type === "percent" && Math.abs((t.amount ?? 0) - 19) < 0.01
+          );
+          if (tax19) isGross19 = true;
+        }
+      }
     }
 
     // ------------------------------------------------------------------
-    // 6) Ancillary costs (services charges)
+    // 6) Ancillary costs
     // ------------------------------------------------------------------
     const ancillary_current =
       typeof tenancyRec.current_ancillary_costs === "number"
         ? tenancyRec.current_ancillary_costs
         : null;
 
-    let ancillary_vat_rate: 19 | 0 | null = null;
+    let ancillary_vat_rate: number | null = null;
     if (tenancyRec.ancillary_cost_type_id && Array.isArray(tenancyRec.ancillary_cost_type_id)) {
-      const label = tenancyRec.ancillary_cost_type_id[1] ?? "";
-      if (label.includes("19%")) ancillary_vat_rate = 19;
-      else if (label.includes("0%")) ancillary_vat_rate = 0;
+      const ancTypeId = tenancyRec.ancillary_cost_type_id[0];
+
+      const ancTypes = await odoo.executeKw<
+        Array<{
+          id: number;
+          product_id?: [number, string] | false | null;
+        }>
+      >("tenancy.ancillary.cost.type", "read", [[ancTypeId], ["product_id"]]);
+
+      const ancType = ancTypes?.[0];
+      if (ancType && ancType.product_id && Array.isArray(ancType.product_id)) {
+        const ancProdId = ancType.product_id[0];
+
+        const ancProds = await odoo.executeKw<
+          Array<{
+            id: number;
+            taxes_id?: number[] | false | null;
+          }>
+        >("product.product", "read", [[ancProdId], ["taxes_id"]]);
+
+        const ancProd = ancProds?.[0];
+        if (ancProd && Array.isArray(ancProd.taxes_id) && ancProd.taxes_id.length > 0) {
+          const ancTaxes = await odoo.executeKw<
+            Array<{
+              id: number;
+              amount_type?: string | null;
+              amount?: number | null;
+            }>
+          >("account.tax", "read", [ancProd.taxes_id, ["amount_type", "amount"]]);
+
+          const ancTax = ancTaxes.find((t) => t.amount_type === "percent");
+          if (ancTax && typeof ancTax.amount === "number") {
+            ancillary_vat_rate = ancTax.amount / 100;
+          }
+        }
+      }
     }
 
     // ------------------------------------------------------------------
-    // 7) Champs temps / seuil / next date / fin contrat (depuis ui_row)
+    // 7) Génération UUID de la tenancy
     // ------------------------------------------------------------------
-    const tenancy_uuid =
-      (ui_row && typeof ui_row.uuid === "string" && ui_row.uuid) ||
-      String(tenancy_id);
+    const tenancy_uuid = `${tenancy_id}`;
 
-    const last_index_date =
-      (ui_row?.adjustment_date as string | null) ?? null;
+    const tenancyType = "residential";
 
-    const current_index_date =
-      monthKeyToDate((ui_row?.adjustment_month_key as string | null) ?? null) ??
-      (ui_row?.current_year_key ? `${ui_row.current_year_key}-01-01` : null);
+    const last_index_date = monthKeyToDate(
+      (ui_row?.adjustment_month_key as string | null) ??
+        (ui_row?.adjustment_year_key as string | null) ??
+        null
+    );
+
+    const current_index_date = monthKeyToDate(
+      (ui_row?.current_month_key as string | null) ??
+        (ui_row?.current_year_key as string | null) ??
+        null
+    );
 
     const pause_between_indexation =
       typeof ui_row?.waiting_time === "number" ? ui_row.waiting_time : null;
@@ -463,7 +497,7 @@ export async function POST(req: NextRequest) {
       typeof ui_row?.delta === "number" ? ui_row.delta : null;
 
     // ------------------------------------------------------------------
-    // 11) Générer + upload PDF (STORAGE)
+    // 11) Générer + upload PDF (STORAGE) - ON NE BLOQUE PLUS SI ÇA FAIL
     // ------------------------------------------------------------------
     const pdfParams: IndexationPdfParams = {
       ind,
@@ -495,91 +529,88 @@ export async function POST(req: NextRequest) {
 
     let pdf_base64: string | null = null;
     if (wantPdf) {
-    // Node runtime: Buffer dispo
-    pdf_base64 = Buffer.from(pdfBytes).toString("base64");
+      // Node runtime: Buffer dispo
+      pdf_base64 = Buffer.from(pdfBytes).toString("base64");
     }
 
-    const { error: uploadErr } = await storageSupabase.storage
-      .from("inbox")
-      .upload(fileName, pdfBytes, {
-        contentType: "application/pdf",
-        upsert: false,
-      });
-    
-    // Définition des variables de résultat Odoo ici pour qu'elles existent même si l'upload PDF fail
+    // ⚠️ CHANGEMENT ICI : on tente l'upload mais on ne bloque plus
+    let pdfUploadOk = false;
+    let pdfUploadError: string | null = null;
+
+    try {
+      const { error: uploadErr } = await storageSupabase.storage
+        .from("inbox")
+        .upload(fileName, pdfBytes, {
+          contentType: "application/pdf",
+          upsert: false,
+        });
+
+      if (uploadErr) {
+        console.error("Storage upload error:", uploadErr);
+        pdfUploadError = uploadErr.message;
+      } else {
+        pdfUploadOk = true;
+      }
+    } catch (uploadCatchErr: any) {
+      console.error("Storage upload exception:", uploadCatchErr);
+      pdfUploadError = uploadCatchErr.message || String(uploadCatchErr);
+    }
+
+    // ------------------------------------------------------------------
+    // 12) Odoo : update rent + adjustment_date (ON CONTINUE QUOI QU'IL ARRIVE)
+    // ------------------------------------------------------------------
     let odooUpdateStatus = {
-        rent_record_id: null as number | null,
-        wrote_rent: false,
-        wrote_adjustment_date: false,
-        error: null as string | null
+      rent_record_id: null as number | null,
+      wrote_rent: false,
+      wrote_adjustment_date: false,
+      error: null as string | null,
     };
 
-    if (uploadErr) {
-      console.error("Storage upload error:", uploadErr);
-      // On retourne erreur PDF mais on ne fait pas l'update Odoo si PDF fail ? 
-      // Ou on tente quand meme ? Généralement si le PDF fail, mieux vaut ne pas toucher à Odoo pour retenter
-      return NextResponse.json({
-        ok: true,
-        indexation_row_id: inserted.id,
-        ind,
-        pdf_upload_ok: false,
-        pdf_upload_error: uploadErr.message,
-        pdf_file_name: fileName,
-        payload_used: payload,
-        property_data: propDebug,
-        pdf_base64,
-        ...odooUpdateStatus // pas d'update odoo
-      });
-    }
-
-    // ------------------------------------------------------------------
-    // 12) Odoo : update rent + adjustment_date (PARTIE AJOUTÉE)
-    // ------------------------------------------------------------------
     try {
-        const rentIds = await odoo.executeKw<number[]>(
-            "property.rent",
-            "search",
-            [[["tenancy_id", "=", tenancy_id]]],
-            { order: "id desc", limit: 1 }
+      const rentIds = await odoo.executeKw<number[]>(
+        "property.rent",
+        "search",
+        [[["tenancy_id", "=", tenancy_id]]],
+        { order: "id desc", limit: 1 }
+      );
+
+      if (Array.isArray(rentIds) && rentIds.length > 0) {
+        const rentId = rentIds[0];
+        odooUpdateStatus.rent_record_id = rentId;
+
+        odooUpdateStatus.wrote_rent = await odoo.executeKw<boolean>(
+          "property.rent",
+          "write",
+          [[rentId], { rent: new_rent }]
         );
+      } else {
+        console.warn(`Odoo: property.rent introuvable pour tenancy_id ${tenancy_id}`);
+      }
 
-        if (Array.isArray(rentIds) && rentIds.length > 0) {
-            const rentId = rentIds[0];
-            odooUpdateStatus.rent_record_id = rentId;
-
-            odooUpdateStatus.wrote_rent = await odoo.executeKw<boolean>(
-                "property.rent",
-                "write",
-                [[rentId], { rent: new_rent }]
-            );
-        } else {
-            console.warn(`Odoo: property.rent introuvable pour tenancy_id ${tenancy_id}`);
-        }
-
-        odooUpdateStatus.wrote_adjustment_date = await odoo.executeKw<boolean>(
-            "property.tenancy",
-            "write",
-            [[tenancy_id], { adjustment_date: effective_date }]
-        );
-
+      odooUpdateStatus.wrote_adjustment_date = await odoo.executeKw<boolean>(
+        "property.tenancy",
+        "write",
+        [[tenancy_id], { adjustment_date: effective_date }]
+      );
     } catch (err: any) {
-        console.error("Erreur lors de la mise à jour Odoo:", err);
-        odooUpdateStatus.error = err.message || String(err);
-        // On ne bloque pas le retour "ok: true" car le PDF et la BDD sont OK, 
-        // mais le front saura qu'il y a eu un souci Odoo
+      console.error("Erreur lors de la mise à jour Odoo:", err);
+      odooUpdateStatus.error = err.message || String(err);
     }
 
+    // ------------------------------------------------------------------
+    // 13) Retour final avec tous les statuts
+    // ------------------------------------------------------------------
     return NextResponse.json({
       ok: true,
       indexation_row_id: inserted.id,
       ind,
-      pdf_upload_ok: true,
+      pdf_upload_ok: pdfUploadOk,
+      pdf_upload_error: pdfUploadError,
       pdf_file_name: fileName,
       payload_used: payload,
       property_data: propDebug,
       pdf_base64,
-      // Infos Odoo ajoutées à la réponse
-      odoo_update: odooUpdateStatus
+      odoo_update: odooUpdateStatus,
     });
 
   } catch (e: unknown) {
