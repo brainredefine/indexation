@@ -332,7 +332,7 @@ export async function POST(req: NextRequest) {
         ? tenancyRec.current_ancillary_costs
         : null;
 
-    let ancillary_vat_rate: number | null = null;
+    let ancillary_vat_rate: 0 | 19 | null = null;
     if (tenancyRec.ancillary_cost_type_id && Array.isArray(tenancyRec.ancillary_cost_type_id)) {
       const ancTypeId = tenancyRec.ancillary_cost_type_id[0];
 
@@ -366,7 +366,12 @@ export async function POST(req: NextRequest) {
 
           const ancTax = ancTaxes.find((t) => t.amount_type === "percent");
           if (ancTax && typeof ancTax.amount === "number") {
-            ancillary_vat_rate = ancTax.amount / 100;
+            // On ne garde que 0 ou 19, sinon null
+            if (Math.abs(ancTax.amount - 0) < 0.01) {
+              ancillary_vat_rate = 0;
+            } else if (Math.abs(ancTax.amount - 19) < 0.01) {
+              ancillary_vat_rate = 19;
+            }
           }
         }
       }
