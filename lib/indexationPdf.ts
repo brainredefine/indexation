@@ -277,10 +277,14 @@ export async function generateIndexationPdf(
   y -= 40;
 
   // ---------------------------------------------------------------------------
-  // Berlin + date – À GAUCHE MAINTENANT
+  // Berlin + date – À GAUCHE MAINTENANT - DATE DU JOUR (pas effective_date)
   // ---------------------------------------------------------------------------
   ensureSpace(120);
-  const dateText = `Berlin, ${dateStr}`;
+  
+  // ✅ Date du jour pour la lettre
+  const today = new Date();
+  const todayStr = formatDateGerman(today.toISOString().slice(0, 10));
+  const dateText = `Berlin, ${todayStr}`;
   
   // ✅ CHANGEMENT ICI : on met le texte à gauche
   const dateX = leftMargin;
