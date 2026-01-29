@@ -262,20 +262,21 @@ export async function POST(req: NextRequest) {
           if (comm) {
             tenantName = comm.name ?? null;
 
-            const countryName =
-              comm.country_id && Array.isArray(comm.country_id) ? comm.country_id[1] : null;
-
-            const addrParts = [
-              comm.street,
-              comm.street2,
-              comm.zip,
-              comm.city,
-              countryName,
-            ]
+            // Construction de l'adresse sur 2-3 lignes : street (+ street2), puis zip + city
+            const addrLines: string[] = [];
+            
+            if (comm.street) addrLines.push(comm.street);
+            if (comm.street2) addrLines.push(comm.street2);
+            
+            // Ligne zip + city
+            const zipCity = [comm.zip, comm.city]
               .filter((v) => typeof v === "string" && v.trim() !== "")
-              .join(", ");
+              .join(" ");
+            if (zipCity) addrLines.push(zipCity);
 
-            if (addrParts) tenantAddress = addrParts;
+            if (addrLines.length > 0) {
+              tenantAddress = addrLines.join("\n");
+            }
           }
         }
       }
