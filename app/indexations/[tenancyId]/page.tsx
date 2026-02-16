@@ -1,7 +1,8 @@
 // app/indexations/[tenancyId]/page.tsx
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { use, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 
 type M2O = [number, string] | null;
 
@@ -43,6 +44,8 @@ type TenancyRow = {
 type ApiPayload = {
   count: number;
   items: TenancyRow[];
+  ref_month?: string;
+  ref_year?: string;
 };
 
 type IndexationFormState = {
@@ -55,6 +58,7 @@ type IndexationFormState = {
   newRent: number | null;
   appliedPct: number | null; // decimal
   effectiveDate: string; // "YYYY-MM-DD"
+  referenceDate: string; // "YYYY-MM-DD" — future adjustment_date for Odoo
   comment: string;
 };
 
@@ -75,12 +79,15 @@ function numOrNull(v: any): number | null {
 export default function IndexationDetailPage({
   params,
 }: {
-  params: { tenancyId: string };
+  params: Promise<{ tenancyId: string }>;
 }) {
-  const tenancyId = useMemo(
-    () => Number(params.tenancyId),
-    [params.tenancyId]
-  );
+  // Next.js 15: params is a Promise in client components — unwrap with use()
+  const { tenancyId: tenancyIdStr } = use(params);
+  const tenancyId = useMemo(() => Number(tenancyIdStr), [tenancyIdStr]);
+
+  const searchParams = useSearchParams();
+  // Read refMonth from query string (propagated from ClientTable)
+  const refMonth = searchParams.get("refMonth") || "";
 
   const [form, setForm] = useState<IndexationFormState>({
     tenancyId: Number.isFinite(tenancyId) ? tenancyId : 0,
@@ -91,6 +98,7 @@ export default function IndexationDetailPage({
     newRent: null,
     appliedPct: null,
     effectiveDate: firstDayOfNextMonthLocal(),
+    referenceDate: firstDayOfNextMonthLocal(),
     comment: "",
   });
 
@@ -111,7 +119,17 @@ export default function IndexationDetailPage({
         setLoading(true);
         setLoadError(null);
 
-        const res = await fetch("/api/tenancies", { cache: "no-store" });
+        // Build URL with refMonth if provided
+        const qp = new URLSearchParams();
+        if (refMonth) {
+          qp.set("refMonth", refMonth);
+          const yearPart = refMonth.split("/")[1];
+          if (yearPart) qp.set("refYear", yearPart);
+        }
+        const qs = qp.toString();
+        const url = `/api/tenancies${qs ? `?${qs}` : ""}`;
+
+        const res = await fetch(url, { cache: "no-store" });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
         const json: ApiPayload = await res.json();
@@ -134,7 +152,7 @@ export default function IndexationDetailPage({
           tenancyId,
           tenancyName: row.name ?? null,
           propertyLabel: row.main_property_id
-            ? `${row.main_property_id[0]} — ${row.main_property_id[1]}`
+            ? `${row.main_property_id[0]} \u2014 ${row.main_property_id[1]}`
             : null,
           tenant: row.name ?? null,
           oldRent,
@@ -152,7 +170,7 @@ export default function IndexationDetailPage({
     return () => {
       cancelled = true;
     };
-  }, [tenancyId]);
+  }, [tenancyId, refMonth]);
 
   // ---------- Form handlers ----------
   const handleChange = <K extends keyof IndexationFormState>(
@@ -193,17 +211,21 @@ export default function IndexationDetailPage({
       form.tenancyName ? `Tenancy: ${form.tenancyName}` : "",
       form.propertyLabel ? `Property: ${form.propertyLabel}` : "",
       form.tenant ? `Tenant: ${form.tenant}` : "",
-      `Old rent: ${form.oldRent ?? "—"}`,
-      `New rent: ${form.newRent ?? "—"}`,
+      `Old rent: ${form.oldRent ?? "\u2014"}`,
+      `New rent: ${form.newRent ?? "\u2014"}`,
       `Increase: ${
-        form.appliedPct != null ? (form.appliedPct * 100).toFixed(2) + "%" : "—"
+        form.appliedPct != null ? (form.appliedPct * 100).toFixed(2) + "%" : "\u2014"
       }`,
       `Effective date: ${form.effectiveDate}`,
+      form.referenceDate !== form.effectiveDate
+        ? `Future reference date: ${form.referenceDate}`
+        : "",
+      refMonth ? `Reference month: ${refMonth}` : "",
       form.comment ? `Comment: ${form.comment}` : "",
     ]
       .filter(Boolean)
       .join("\n");
-  }, [form]);
+  }, [form, refMonth]);
 
   function downloadPdfFromBase64(b64: string, filename = "indexation.pdf") {
     const byteCharacters = atob(b64);
@@ -255,6 +277,7 @@ export default function IndexationDetailPage({
           new_rent: newRent,
           applied_pct: appliedPct,
           effective_date: form.effectiveDate,
+          reference_date: form.referenceDate || form.effectiveDate,
           comment: form.comment,
           ui_row: sourceRow,
           return_pdf: true,
@@ -277,7 +300,7 @@ export default function IndexationDetailPage({
         );
       }
 
-      alert(`Indexation saved.\nIND: ${json.ind ?? "—"}`);
+      alert(`Indexation saved.\nIND: ${json.ind ?? "\u2014"}`);
     } catch (e: any) {
       console.error(e);
       alert(`Unexpected error: ${e?.message ?? String(e)}`);
@@ -286,11 +309,11 @@ export default function IndexationDetailPage({
     }
   };
 
-    const handleBackToList = () => {
+  const handleBackToList = () => {
     if (typeof window !== "undefined") {
-        window.location.href = "/NO-AM";
+      window.location.href = "/NO-AM";
     }
-    };
+  };
 
   if (!Number.isFinite(tenancyId)) {
     return (
@@ -329,6 +352,12 @@ export default function IndexationDetailPage({
             {form.propertyLabel && (
               <p className="text-xs text-gray-700">
                 Property: {form.propertyLabel}
+              </p>
+            )}
+
+            {refMonth && (
+              <p className="text-xs text-gray-700">
+                Reference month: <span className="font-mono">{refMonth}</span>
               </p>
             )}
 
@@ -406,6 +435,21 @@ export default function IndexationDetailPage({
                 value={form.effectiveDate}
                 onChange={(e) => handleChange("effectiveDate", e.target.value)}
               />
+            </div>
+
+            <div>
+              <label className="block text-xs text-gray-700 mb-1">
+                Future reference date
+              </label>
+              <input
+                type="date"
+                className="w-full border border-gray-400 rounded px-2 py-1 text-sm text-gray-900"
+                value={form.referenceDate}
+                onChange={(e) => handleChange("referenceDate", e.target.value)}
+              />
+              <p className="text-[10px] text-gray-500 mt-0.5">
+                Next indexation reference in Odoo (defaults to effective date)
+              </p>
             </div>
           </div>
 

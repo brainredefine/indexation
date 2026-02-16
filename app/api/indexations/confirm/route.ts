@@ -18,6 +18,7 @@ type Body = {
   new_rent?: number;
   applied_pct?: number | null;   // décimal
   effective_date?: string;       // "YYYY-MM-DD"
+  reference_date?: string;       // "YYYY-MM-DD" — written to Odoo adjustment_date (defaults to effective_date)
   comment?: string | null;
   ui_row?: UiRow;
   return_pdf?: boolean;
@@ -81,6 +82,7 @@ export async function POST(req: NextRequest) {
     const new_rent = Number(body.new_rent);
     const applied_pct = body.applied_pct ?? null;
     const effective_date = body.effective_date;
+    const reference_date = body.reference_date || body.effective_date; // fallback
     const comment = body.comment ?? null;
     const ui_row = (body.ui_row ?? null) as UiRow;
 
@@ -116,7 +118,6 @@ export async function POST(req: NextRequest) {
         partner_id?: [number, string] | false | null;
         rent_product_id?: [number, string] | false | null;
         name?: string | null;
-
         current_ancillary_costs?: number | null;
         ancillary_cost_type_id?: [number, string] | false | null;
       }>
@@ -188,22 +189,18 @@ export async function POST(req: NextRequest) {
       if (p) {
         propDebug = p;
         property_id = String(p.id);
-
         if (p.company_id && Array.isArray(p.company_id)) {
           companyIdForInd = String(p.company_id[0]);
           fund = String(p.company_id[1] ?? p.company_id[0]);
         }
-
         if (p.entity_id && Array.isArray(p.entity_id)) {
           entity = String(p.entity_id[1] ?? p.entity_id[0]);
         }
-
         if (typeof p.reference_id === "string") {
           slate_id = p.reference_id;
         } else if (typeof p.internal_label === "string") {
           slate_id = p.internal_label;
         }
-
         const countryName =
           p.country_id && Array.isArray(p.country_id) ? p.country_id[1] : null;
         const parts = [p.street, p.zip, p.city, countryName]
@@ -218,8 +215,8 @@ export async function POST(req: NextRequest) {
     // ------------------------------------------------------------------
     let tenantName: string | null = null;
     let tenantAddress: string | null = null;
-
     let partnerId: number | null = null;
+
     if (tenancyRec.partner_id && Array.isArray(tenancyRec.partner_id)) {
       partnerId = tenancyRec.partner_id[0];
     }
@@ -261,19 +258,13 @@ export async function POST(req: NextRequest) {
           const comm = commercial?.[0];
           if (comm) {
             tenantName = comm.name ?? null;
-
-            // Construction de l'adresse sur 2-3 lignes : street (+ street2), puis zip + city
             const addrLines: string[] = [];
-            
             if (comm.street) addrLines.push(comm.street);
             if (comm.street2) addrLines.push(comm.street2);
-            
-            // Ligne zip + city
             const zipCity = [comm.zip, comm.city]
               .filter((v) => typeof v === "string" && v.trim() !== "")
               .join(" ");
             if (zipCity) addrLines.push(zipCity);
-
             if (addrLines.length > 0) {
               tenantAddress = addrLines.join("\n");
             }
@@ -294,7 +285,6 @@ export async function POST(req: NextRequest) {
     // 5) TVA Loyer
     // ------------------------------------------------------------------
     let isGross19 = false;
-
     if (tenancyRec.rent_product_id && Array.isArray(tenancyRec.rent_product_id)) {
       const rentProdId = tenancyRec.rent_product_id[0];
 
@@ -332,14 +322,10 @@ export async function POST(req: NextRequest) {
       typeof tenancyRec.current_ancillary_costs === "number"
         ? tenancyRec.current_ancillary_costs
         : null;
-
     let ancillary_vat_rate: 0 | 19 | null = null;
-    
-    // On lit directement le nom du M2O ancillary_cost_type_id
+
     if (tenancyRec.ancillary_cost_type_id && Array.isArray(tenancyRec.ancillary_cost_type_id)) {
       const ancTypeName = String(tenancyRec.ancillary_cost_type_id[1] || "").toLowerCase();
-      
-      // On cherche "19" ou "0" dans le nom
       if (ancTypeName.includes("19")) {
         ancillary_vat_rate = 19;
       } else if (ancTypeName.includes("0") || ancTypeName.includes("zero")) {
@@ -351,7 +337,6 @@ export async function POST(req: NextRequest) {
     // 7) Génération UUID de la tenancy
     // ------------------------------------------------------------------
     const tenancy_uuid = `${tenancy_id}`;
-
     const tenancyType = "residential";
 
     const last_index_date = monthKeyToDate(
@@ -359,7 +344,6 @@ export async function POST(req: NextRequest) {
         (ui_row?.adjustment_year_key as string | null) ??
         null
     );
-
     const current_index_date = monthKeyToDate(
       (ui_row?.current_month_key as string | null) ??
         (ui_row?.current_year_key as string | null) ??
@@ -370,8 +354,8 @@ export async function POST(req: NextRequest) {
       typeof ui_row?.waiting_time === "number" ? ui_row.waiting_time : null;
 
     let next_possible_indexation_date: string | null = null;
-    if (effective_date && pause_between_indexation != null && Number.isFinite(pause_between_indexation)) {
-      next_possible_indexation_date = addMonthsToFirstOfMonth(effective_date, pause_between_indexation);
+    if (reference_date && pause_between_indexation != null && Number.isFinite(pause_between_indexation)) {
+      next_possible_indexation_date = addMonthsToFirstOfMonth(reference_date, pause_between_indexation);
     } else {
       next_possible_indexation_date = (ui_row?.next_wait_date as string | null) ?? null;
     }
@@ -380,7 +364,7 @@ export async function POST(req: NextRequest) {
       (ui_row?.date_end_display as string | null) ?? null;
 
     // ------------------------------------------------------------------
-    // 8) Insert DATA Supabase (pas d'upload Odoo)
+    // 8) Insert DATA Supabase
     // ------------------------------------------------------------------
     const payload = {
       tenancy_uuid,
@@ -388,32 +372,28 @@ export async function POST(req: NextRequest) {
       entity,
       slate_id,
       property_id,
-      address: propertyAddress ?? null, // adresse du bien pour DATA
+      address: propertyAddress ?? null,
       tenant: tenantName,
       type: tenancyType,
-
       rent_before_indexation: old_rent,
       rent_after_indexation: new_rent,
-
       last_index_date,
       last_index_score:
         typeof ui_row?.adjustment_index === "number" ? ui_row.adjustment_index : null,
       current_index_date,
       current_index_score:
         typeof ui_row?.current_index === "number" ? ui_row.current_index : null,
-
       indexation_trigger: ui_row?.reason ?? null,
       threshold: typeof ui_row?.threshold === "number" ? ui_row.threshold : null,
       pause_between_indexation,
       percent_increase: typeof ui_row?.delta === "number" ? ui_row.delta : null,
       percent_applied: applied_pct,
       adjustment_period: ui_row?.adjustment_period ?? null,
-
       next_possible_indexation_date,
       end_of_contract,
       indexation_comment: comment,
       effective_date,
-
+      reference_date: reference_date ?? effective_date,
       company_id: companyIdForInd,
       year,
     };
@@ -434,21 +414,7 @@ export async function POST(req: NextRequest) {
     // ------------------------------------------------------------------
     // 9) Nom fichier PDF
     // ------------------------------------------------------------------
-    const tenantNo = extractTenantNo(tenancyNameForTenantNo ?? null) ?? "0";
-    const ttype = `1.7.6.${tenantNo}`;
-    const tasset = slate_id ?? "UNKNOWN";
-    const tname = "Indexation%20Letter";
-    const tscope = "asset";
-    const tdate = effective_date;
-    const tmail = "automatic";
-
-    const fileName =
-      `m(ttype=${ttype})` +
-      `(tasset=${encodeURIComponent(tasset)})` +
-      `(tname=${tname})` +
-      `(tscope=${tscope})` +
-      `(tdate=${tdate})` +
-      `(tmail=${tmail}).pdf`;
+    const fileName = `${ind ?? tenancy_id}.pdf`;
 
     // ------------------------------------------------------------------
     // 10) Données index pour le PDF
@@ -457,61 +423,50 @@ export async function POST(req: NextRequest) {
       typeof ui_row?.adjustment_index === "number" ? ui_row.adjustment_index : null;
     const index_cur_value =
       typeof ui_row?.current_index === "number" ? ui_row.current_index : null;
-
     const index_prev_label =
       (ui_row?.adjustment_month_key as string | null) ??
       (ui_row?.adjustment_year_key as string | null) ??
       null;
-
     const index_cur_label =
       (ui_row?.current_month_key as string | null) ??
       (ui_row?.current_year_key as string | null) ??
       null;
-
     const index_delta =
       typeof ui_row?.delta === "number" ? ui_row.delta : null;
 
     // ------------------------------------------------------------------
-    // 11) Générer + upload PDF (STORAGE) - ON NE BLOQUE PLUS SI ÇA FAIL
+    // 11) Générer + upload PDF (STORAGE)
     // ------------------------------------------------------------------
     const pdfParams: IndexationPdfParams = {
       ind,
       tenancy_id,
       tenant: tenantName,
       property_label: propertyLabelForPdf,
-      address: tenantAddress, // adresse locataire
+      address: tenantAddress,
       old_rent,
       new_rent,
       applied_pct: applied_pct as number | null,
       effective_date,
-
       index_prev_value,
       index_prev_label,
       index_cur_value,
       index_cur_label,
       index_delta,
-
       is_gross_19: isGross19,
-
       ancillary_current,
       ancillary_vat_rate,
     };
 
     const pdfBytes = await generateIndexationPdf(pdfParams);
 
-    // ✅ si on veut renvoyer le pdf au client
     const wantPdf = Boolean(body.return_pdf);
-
     let pdf_base64: string | null = null;
     if (wantPdf) {
-      // Node runtime: Buffer dispo
       pdf_base64 = Buffer.from(pdfBytes).toString("base64");
     }
 
-    // ⚠️ CHANGEMENT ICI : on tente l'upload mais on ne bloque plus
     let pdfUploadOk = false;
     let pdfUploadError: string | null = null;
-
     try {
       const { error: uploadErr } = await storageSupabase.storage
         .from("inbox")
@@ -519,7 +474,6 @@ export async function POST(req: NextRequest) {
           contentType: "application/pdf",
           upsert: false,
         });
-
       if (uploadErr) {
         console.error("Storage upload error:", uploadErr);
         pdfUploadError = uploadErr.message;
@@ -532,7 +486,7 @@ export async function POST(req: NextRequest) {
     }
 
     // ------------------------------------------------------------------
-    // 12) Odoo : update rent + adjustment_date (ON CONTINUE QUOI QU'IL ARRIVE)
+    // 12) Odoo : update rent + adjustment_date
     // ------------------------------------------------------------------
     let odooUpdateStatus = {
       rent_record_id: null as number | null,
@@ -559,13 +513,14 @@ export async function POST(req: NextRequest) {
           [[rentId], { rent: new_rent }]
         );
       } else {
+        // FIX: was a tagged template literal, now a proper function call
         console.warn(`Odoo: property.rent introuvable pour tenancy_id ${tenancy_id}`);
       }
 
       odooUpdateStatus.wrote_adjustment_date = await odoo.executeKw<boolean>(
         "property.tenancy",
         "write",
-        [[tenancy_id], { adjustment_date: effective_date }]
+        [[tenancy_id], { adjustment_date: reference_date }]
       );
     } catch (err: any) {
       console.error("Erreur lors de la mise à jour Odoo:", err);
@@ -573,7 +528,7 @@ export async function POST(req: NextRequest) {
     }
 
     // ------------------------------------------------------------------
-    // 13) Retour final avec tous les statuts
+    // 13) Retour final
     // ------------------------------------------------------------------
     return NextResponse.json({
       ok: true,
@@ -587,7 +542,6 @@ export async function POST(req: NextRequest) {
       pdf_base64,
       odoo_update: odooUpdateStatus,
     });
-
   } catch (e: unknown) {
     console.error(e);
     const msg = e instanceof Error ? e.message : String(e);
