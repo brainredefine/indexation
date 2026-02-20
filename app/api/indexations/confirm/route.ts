@@ -6,12 +6,9 @@ import {
   generateIndexationPdf,
   IndexationPdfParams,
 } from "@/lib/indexationPdf";
-
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
-
 type UiRow = Record<string, any> | null;
-
 type Body = {
   tenancy_id?: number;
   old_rent?: number;
@@ -22,8 +19,12 @@ type Body = {
   comment?: string | null;
   ui_row?: UiRow;
   return_pdf?: boolean;
+  dry_run?: boolean;             // preview mode: no DB insert, no Odoo write, IND = "PREVIEW"
+  // Nebenkosten indexation
+  index_nebenkosten?: boolean;
+  new_ancillary?: number | null;
+  ancillary_applied_pct?: number | null; // decimal
 };
-
 function getDataSupabase() {
   const url = process.env.SUPABASE_URL_DATA!;
   const key = process.env.SUPABASE_API_KEY_DATA!;
@@ -32,7 +33,6 @@ function getDataSupabase() {
   }
   return createClient(url, key, { auth: { persistSession: false } });
 }
-
 function getStorageSupabase() {
   const url = process.env.SUPABASE_URL_STORAGE!;
   const key = process.env.SUPABASE_API_KEY_STORAGE!;
@@ -41,7 +41,6 @@ function getStorageSupabase() {
   }
   return createClient(url, key, { auth: { persistSession: false } });
 }
-
 function monthKeyToDate(mk?: string | null): string | null {
   if (!mk) return null;
   const [m, y] = mk.split("/");
@@ -49,7 +48,6 @@ function monthKeyToDate(mk?: string | null): string | null {
   if (!/^\d{2}$/.test(m) || !/^\d{4}$/.test(y)) return null;
   return `${y}-${m}-01`;
 }
-
 function addMonthsToFirstOfMonth(dateStr: string, months: number): string | null {
   const d = new Date(dateStr);
   if (Number.isNaN(d.getTime())) return null;
@@ -61,7 +59,6 @@ function addMonthsToFirstOfMonth(dateStr: string, months: number): string | null
   const mm = String(base.getUTCMonth() + 1).padStart(2, "0");
   return `${yyyy}-${mm}-01`;
 }
-
 /** "AC01 - 09 - Deichmann" -> "9" */
 function extractTenantNo(name?: string | null): string | null {
   if (!name) return null;
@@ -72,11 +69,9 @@ function extractTenantNo(name?: string | null): string | null {
   if (!Number.isFinite(num)) return null;
   return String(num);
 }
-
 export async function POST(req: NextRequest) {
   try {
     const body = (await req.json()) as Body;
-
     const tenancy_id = Number(body.tenancy_id);
     const old_rent = Number(body.old_rent);
     const new_rent = Number(body.new_rent);
@@ -85,6 +80,12 @@ export async function POST(req: NextRequest) {
     const reference_date = body.reference_date || body.effective_date; // fallback
     const comment = body.comment ?? null;
     const ui_row = (body.ui_row ?? null) as UiRow;
+    const dryRun = Boolean(body.dry_run);
+
+    // Nebenkosten indexation params
+    const indexNebenkosten = Boolean(body.index_nebenkosten);
+    const bodyNewAncillary = body.new_ancillary ?? null;
+    const bodyAncillaryPct = body.ancillary_applied_pct ?? null;
 
     if (!Number.isFinite(tenancy_id) || tenancy_id <= 0) {
       return NextResponse.json({ ok: false, error: "tenancy_id invalide" }, { status: 400 });
@@ -99,15 +100,12 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: false, error: "effective_date manquante" }, { status: 400 });
     }
 
-    const dataSupabase = getDataSupabase();
-    const storageSupabase = getStorageSupabase();
     const odoo = new OdooClient();
 
     const effDateObj = new Date(effective_date);
     const year = Number.isFinite(effDateObj.getTime())
       ? effDateObj.getUTCFullYear()
       : new Date().getUTCFullYear();
-
     // ------------------------------------------------------------------
     // 1) Lire property.tenancy (pour property, partner, vat rent, ancillary)
     // ------------------------------------------------------------------
@@ -132,21 +130,17 @@ export async function POST(req: NextRequest) {
         "ancillary_cost_type_id",
       ],
     ]);
-
     const tenancyRec = tenancies?.[0];
     if (!tenancyRec) {
       return NextResponse.json({ ok: false, error: "Tenancy introuvable dans Odoo" }, { status: 404 });
     }
-
     const tenancyNameForTenantNo: string | null =
       tenancyRec.name ??
       (typeof ui_row?.name === "string" ? ui_row.name : null);
-
     let propertyId: number | null = null;
     if (tenancyRec.main_property_id && Array.isArray(tenancyRec.main_property_id)) {
       propertyId = tenancyRec.main_property_id[0];
     }
-
     // ------------------------------------------------------------------
     // 2) Lire property.property (fund, entity, slate_id, address asset)
     // ------------------------------------------------------------------
@@ -157,7 +151,6 @@ export async function POST(req: NextRequest) {
     let property_id: string | null = null;
     let propertyAddress: string | null = null;
     let propDebug: any = null;
-
     if (propertyId != null) {
       const props = await odoo.executeKw<
         Array<{
@@ -184,7 +177,6 @@ export async function POST(req: NextRequest) {
           "country_id",
         ],
       ]);
-
       const p = props?.[0];
       if (p) {
         propDebug = p;
@@ -209,18 +201,15 @@ export async function POST(req: NextRequest) {
         if (parts) propertyAddress = parts;
       }
     }
-
     // ------------------------------------------------------------------
     // 3) Bridge locataire: partner_id -> res.partner -> commercial_partner
     // ------------------------------------------------------------------
     let tenantName: string | null = null;
     let tenantAddress: string | null = null;
     let partnerId: number | null = null;
-
     if (tenancyRec.partner_id && Array.isArray(tenancyRec.partner_id)) {
       partnerId = tenancyRec.partner_id[0];
     }
-
     if (partnerId != null) {
       const partners = await odoo.executeKw<
         Array<{
@@ -229,7 +218,6 @@ export async function POST(req: NextRequest) {
           commercial_partner_id?: [number, string] | false | null;
         }>
       >("res.partner", "read", [[partnerId], ["name", "commercial_partner_id"]]);
-
       const partnerRec = partners?.[0];
       if (partnerRec) {
         let commercialId: number | null = null;
@@ -238,7 +226,6 @@ export async function POST(req: NextRequest) {
         } else {
           commercialId = partnerRec.id;
         }
-
         if (commercialId) {
           const commercial = await odoo.executeKw<
             Array<{
@@ -254,7 +241,6 @@ export async function POST(req: NextRequest) {
             [commercialId],
             ["name", "street", "street2", "zip", "city", "country_id"],
           ]);
-
           const comm = commercial?.[0];
           if (comm) {
             tenantName = comm.name ?? null;
@@ -272,7 +258,6 @@ export async function POST(req: NextRequest) {
         }
       }
     }
-
     // ------------------------------------------------------------------
     // 4) Label pour PDF
     // ------------------------------------------------------------------
@@ -280,21 +265,18 @@ export async function POST(req: NextRequest) {
     if (tenancyRec.main_property_id && Array.isArray(tenancyRec.main_property_id)) {
       propertyLabelForPdf = String(tenancyRec.main_property_id[1] ?? tenancyRec.main_property_id[0]);
     }
-
     // ------------------------------------------------------------------
     // 5) TVA Loyer
     // ------------------------------------------------------------------
     let isGross19 = false;
     if (tenancyRec.rent_product_id && Array.isArray(tenancyRec.rent_product_id)) {
       const rentProdId = tenancyRec.rent_product_id[0];
-
       const rentProds = await odoo.executeKw<
         Array<{
           id: number;
           taxes_id?: number[] | false | null;
         }>
       >("product.product", "read", [[rentProdId], ["taxes_id"]]);
-
       const rentProd = rentProds?.[0];
       if (rentProd) {
         const taxIds = rentProd.taxes_id;
@@ -306,7 +288,6 @@ export async function POST(req: NextRequest) {
               amount?: number | null;
             }>
           >("account.tax", "read", [taxIds, ["amount_type", "amount"]]);
-
           const tax19 = taxes.find(
             (t) => t.amount_type === "percent" && Math.abs((t.amount ?? 0) - 19) < 0.01
           );
@@ -314,7 +295,6 @@ export async function POST(req: NextRequest) {
         }
       }
     }
-
     // ------------------------------------------------------------------
     // 6) Ancillary costs
     // ------------------------------------------------------------------
@@ -323,7 +303,6 @@ export async function POST(req: NextRequest) {
         ? tenancyRec.current_ancillary_costs
         : null;
     let ancillary_vat_rate: 0 | 19 | null = null;
-
     if (tenancyRec.ancillary_cost_type_id && Array.isArray(tenancyRec.ancillary_cost_type_id)) {
       const ancTypeName = String(tenancyRec.ancillary_cost_type_id[1] || "").toLowerCase();
       if (ancTypeName.includes("19")) {
@@ -334,11 +313,33 @@ export async function POST(req: NextRequest) {
     }
 
     // ------------------------------------------------------------------
+    // 6b) Nebenkosten indexation: resolve final new ancillary
+    // ------------------------------------------------------------------
+    let ancillaryNew: number | null = null;
+    let ancillaryAppliedPct: number | null = null;
+
+    if (indexNebenkosten && ancillary_current != null) {
+      if (bodyNewAncillary != null && Number.isFinite(bodyNewAncillary)) {
+        // Client provided an explicit new NK amount
+        ancillaryNew = bodyNewAncillary;
+        ancillaryAppliedPct =
+          bodyAncillaryPct != null
+            ? bodyAncillaryPct
+            : ancillary_current > 0
+              ? ancillaryNew / ancillary_current - 1
+              : null;
+      } else if (applied_pct != null) {
+        // Fallback: apply same percentage as rent
+        ancillaryNew = +(ancillary_current * (1 + applied_pct)).toFixed(2);
+        ancillaryAppliedPct = applied_pct;
+      }
+    }
+
+    // ------------------------------------------------------------------
     // 7) Génération UUID de la tenancy
     // ------------------------------------------------------------------
     const tenancy_uuid = `${tenancy_id}`;
     const tenancyType = "residential";
-
     const last_index_date = monthKeyToDate(
       (ui_row?.adjustment_month_key as string | null) ??
         (ui_row?.adjustment_year_key as string | null) ??
@@ -349,73 +350,81 @@ export async function POST(req: NextRequest) {
         (ui_row?.current_year_key as string | null) ??
         null
     );
-
     const pause_between_indexation =
       typeof ui_row?.waiting_time === "number" ? ui_row.waiting_time : null;
-
     let next_possible_indexation_date: string | null = null;
     if (reference_date && pause_between_indexation != null && Number.isFinite(pause_between_indexation)) {
       next_possible_indexation_date = addMonthsToFirstOfMonth(reference_date, pause_between_indexation);
     } else {
       next_possible_indexation_date = (ui_row?.next_wait_date as string | null) ?? null;
     }
-
     const end_of_contract =
       (ui_row?.date_end_display as string | null) ?? null;
 
     // ------------------------------------------------------------------
-    // 8) Insert DATA Supabase
+    // 8) Insert DATA Supabase (skip in dry_run)
     // ------------------------------------------------------------------
-    const payload = {
-      tenancy_uuid,
-      fund,
-      entity,
-      slate_id,
-      property_id,
-      address: propertyAddress ?? null,
-      tenant: tenantName,
-      type: tenancyType,
-      rent_before_indexation: old_rent,
-      rent_after_indexation: new_rent,
-      last_index_date,
-      last_index_score:
-        typeof ui_row?.adjustment_index === "number" ? ui_row.adjustment_index : null,
-      current_index_date,
-      current_index_score:
-        typeof ui_row?.current_index === "number" ? ui_row.current_index : null,
-      indexation_trigger: ui_row?.reason ?? null,
-      threshold: typeof ui_row?.threshold === "number" ? ui_row.threshold : null,
-      pause_between_indexation,
-      percent_increase: typeof ui_row?.delta === "number" ? ui_row.delta : null,
-      percent_applied: applied_pct,
-      adjustment_period: ui_row?.adjustment_period ?? null,
-      next_possible_indexation_date,
-      end_of_contract,
-      indexation_comment: comment,
-      effective_date,
-      reference_date: reference_date ?? effective_date,
-      company_id: companyIdForInd,
-      year,
-    };
+    let ind: string | null = null;
+    let insertedId: number | null = null;
 
-    const { data: inserted, error: insErr } = await dataSupabase
-      .from("indexations")
-      .insert(payload)
-      .select("*")
-      .single();
+    if (!dryRun) {
+      const dataSupabase = getDataSupabase();
 
-    if (insErr) {
-      console.error("DATA insert error:", insErr);
-      return NextResponse.json({ ok: false, error: "insert indexations échoué" }, { status: 500 });
+      const payload = {
+        tenancy_uuid,
+        fund,
+        entity,
+        slate_id,
+        property_id,
+        address: propertyAddress ?? null,
+        tenant: tenantName,
+        type: tenancyType,
+        rent_before_indexation: old_rent,
+        rent_after_indexation: new_rent,
+        last_index_date,
+        last_index_score:
+          typeof ui_row?.adjustment_index === "number" ? ui_row.adjustment_index : null,
+        current_index_date,
+        current_index_score:
+          typeof ui_row?.current_index === "number" ? ui_row.current_index : null,
+        indexation_trigger: ui_row?.reason ?? null,
+        threshold: typeof ui_row?.threshold === "number" ? ui_row.threshold : null,
+        pause_between_indexation,
+        percent_increase: typeof ui_row?.delta === "number" ? ui_row.delta : null,
+        percent_applied: applied_pct,
+        adjustment_period: ui_row?.adjustment_period ?? null,
+        next_possible_indexation_date,
+        end_of_contract,
+        indexation_comment: comment,
+        effective_date,
+        reference_date: reference_date ?? effective_date,
+        company_id: companyIdForInd,
+        year,
+      };
+
+      const { data: inserted, error: insErr } = await dataSupabase
+        .from("indexations")
+        .insert(payload)
+        .select("*")
+        .single();
+      if (insErr) {
+        console.error("DATA insert error:", insErr);
+        return NextResponse.json({ ok: false, error: "insert indexations échoué" }, { status: 500 });
+      }
+
+      ind = (inserted as any).ind as string | null;
+      insertedId = (inserted as any).id as number | null;
+    } else {
+      // dry_run: use a placeholder IND
+      ind = "PREVIEW";
     }
-
-    const ind = (inserted as any).ind as string | null;
 
     // ------------------------------------------------------------------
     // 9) Nom fichier PDF
     // ------------------------------------------------------------------
-    const fileName = `${ind ?? tenancy_id}.pdf`;
-
+    const fileName = dryRun
+      ? `preview_${tenancy_id}.pdf`
+      : `${ind ?? tenancy_id}.pdf`;
     // ------------------------------------------------------------------
     // 10) Données index pour le PDF
     // ------------------------------------------------------------------
@@ -433,12 +442,11 @@ export async function POST(req: NextRequest) {
       null;
     const index_delta =
       typeof ui_row?.delta === "number" ? ui_row.delta : null;
-
     // ------------------------------------------------------------------
-    // 11) Générer + upload PDF (STORAGE)
+    // 11) Générer PDF + upload (skip upload in dry_run)
     // ------------------------------------------------------------------
     const pdfParams: IndexationPdfParams = {
-      ind,
+      ind: dryRun ? null : ind,
       tenancy_id,
       tenant: tenantName,
       property_label: propertyLabelForPdf,
@@ -455,10 +463,12 @@ export async function POST(req: NextRequest) {
       is_gross_19: isGross19,
       ancillary_current,
       ancillary_vat_rate,
+      // Nebenkosten indexation
+      index_nebenkosten: indexNebenkosten,
+      ancillary_new: ancillaryNew,
+      ancillary_applied_pct: ancillaryAppliedPct,
     };
-
     const pdfBytes = await generateIndexationPdf(pdfParams);
-
     const wantPdf = Boolean(body.return_pdf);
     let pdf_base64: string | null = null;
     if (wantPdf) {
@@ -467,26 +477,31 @@ export async function POST(req: NextRequest) {
 
     let pdfUploadOk = false;
     let pdfUploadError: string | null = null;
-    try {
-      const { error: uploadErr } = await storageSupabase.storage
-        .from("inbox")
-        .upload(fileName, pdfBytes, {
-          contentType: "application/pdf",
-          upsert: false,
-        });
-      if (uploadErr) {
-        console.error("Storage upload error:", uploadErr);
-        pdfUploadError = uploadErr.message;
-      } else {
-        pdfUploadOk = true;
+
+    if (!dryRun) {
+      const storageSupabase = getStorageSupabase();
+
+      try {
+        const { error: uploadErr } = await storageSupabase.storage
+          .from("inbox")
+          .upload(fileName, pdfBytes, {
+            contentType: "application/pdf",
+            upsert: false,
+          });
+        if (uploadErr) {
+          console.error("Storage upload error:", uploadErr);
+          pdfUploadError = uploadErr.message;
+        } else {
+          pdfUploadOk = true;
+        }
+      } catch (uploadCatchErr: any) {
+        console.error("Storage upload exception:", uploadCatchErr);
+        pdfUploadError = uploadCatchErr.message || String(uploadCatchErr);
       }
-    } catch (uploadCatchErr: any) {
-      console.error("Storage upload exception:", uploadCatchErr);
-      pdfUploadError = uploadCatchErr.message || String(uploadCatchErr);
     }
 
     // ------------------------------------------------------------------
-    // 12) Odoo : update rent + adjustment_date
+    // 12) Odoo : update rent + adjustment_date (skip in dry_run)
     // ------------------------------------------------------------------
     let odooUpdateStatus = {
       rent_record_id: null as number | null,
@@ -495,36 +510,34 @@ export async function POST(req: NextRequest) {
       error: null as string | null,
     };
 
-    try {
-      const rentIds = await odoo.executeKw<number[]>(
-        "property.rent",
-        "search",
-        [[["tenancy_id", "=", tenancy_id]]],
-        { order: "id desc", limit: 1 }
-      );
-
-      if (Array.isArray(rentIds) && rentIds.length > 0) {
-        const rentId = rentIds[0];
-        odooUpdateStatus.rent_record_id = rentId;
-
-        odooUpdateStatus.wrote_rent = await odoo.executeKw<boolean>(
+    if (!dryRun) {
+      try {
+        const rentIds = await odoo.executeKw<number[]>(
           "property.rent",
-          "write",
-          [[rentId], { rent: new_rent }]
+          "search",
+          [[["tenancy_id", "=", tenancy_id]]],
+          { order: "id desc", limit: 1 }
         );
-      } else {
-        // FIX: was a tagged template literal, now a proper function call
-        console.warn(`Odoo: property.rent introuvable pour tenancy_id ${tenancy_id}`);
+        if (Array.isArray(rentIds) && rentIds.length > 0) {
+          const rentId = rentIds[0];
+          odooUpdateStatus.rent_record_id = rentId;
+          odooUpdateStatus.wrote_rent = await odoo.executeKw<boolean>(
+            "property.rent",
+            "write",
+            [[rentId], { rent: new_rent }]
+          );
+        } else {
+          console.warn(`Odoo: property.rent introuvable pour tenancy_id ${tenancy_id}`);
+        }
+        odooUpdateStatus.wrote_adjustment_date = await odoo.executeKw<boolean>(
+          "property.tenancy",
+          "write",
+          [[tenancy_id], { adjustment_date: reference_date }]
+        );
+      } catch (err: any) {
+        console.error("Erreur lors de la mise à jour Odoo:", err);
+        odooUpdateStatus.error = err.message || String(err);
       }
-
-      odooUpdateStatus.wrote_adjustment_date = await odoo.executeKw<boolean>(
-        "property.tenancy",
-        "write",
-        [[tenancy_id], { adjustment_date: reference_date }]
-      );
-    } catch (err: any) {
-      console.error("Erreur lors de la mise à jour Odoo:", err);
-      odooUpdateStatus.error = err.message || String(err);
     }
 
     // ------------------------------------------------------------------
@@ -532,15 +545,19 @@ export async function POST(req: NextRequest) {
     // ------------------------------------------------------------------
     return NextResponse.json({
       ok: true,
-      indexation_row_id: inserted.id,
+      dry_run: dryRun,
+      indexation_row_id: insertedId,
       ind,
       pdf_upload_ok: pdfUploadOk,
       pdf_upload_error: pdfUploadError,
       pdf_file_name: fileName,
-      payload_used: payload,
-      property_data: propDebug,
       pdf_base64,
-      odoo_update: odooUpdateStatus,
+      ...(dryRun
+        ? {}
+        : {
+            property_data: propDebug,
+            odoo_update: odooUpdateStatus,
+          }),
     });
   } catch (e: unknown) {
     console.error(e);

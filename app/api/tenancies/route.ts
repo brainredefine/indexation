@@ -20,6 +20,7 @@ type TenancyRec = {
   waiting_time?: number | null;
   date_end_display?: string | null;
   is_indexing_rent?: boolean | number | string | null;
+  current_ancillary_costs?: number | null;
 };
 
 type IndexKind =
@@ -133,6 +134,7 @@ export async function GET(request: NextRequest) {
     "waiting_time",
     "date_end_display",
     "is_indexing_rent",
+    "current_ancillary_costs",
   ] as const;
 
   const tenancies = await odoo.searchRead<TenancyRec>(
@@ -438,6 +440,7 @@ export async function GET(request: NextRequest) {
       waiting_time: t.waiting_time ?? 0,
       blocked_by_lock: false,
       date_end_display: t.date_end_display ?? null,
+      current_ancillary_costs: t.current_ancillary_costs ?? null,
     };
   }
 }

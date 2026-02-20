@@ -26,6 +26,11 @@ export type IndexationPdfParams = {
 
   ancillary_current: number | null; // netto
   ancillary_vat_rate: 19 | 0 | null;
+
+  // Nebenkosten indexation (optional)
+  index_nebenkosten: boolean;
+  ancillary_new: number | null;        // new NK netto after indexation
+  ancillary_applied_pct: number | null; // decimal, e.g. 0.034
 };
 
 function formatDateGerman(d: string): string {
@@ -78,6 +83,9 @@ export async function generateIndexationPdf(
     is_gross_19,
     ancillary_current,
     ancillary_vat_rate,
+    index_nebenkosten,
+    ancillary_new,
+    ancillary_applied_pct,
   } = params;
 
   const pdfDoc = await PDFDocument.create();
@@ -166,7 +174,7 @@ export async function generateIndexationPdf(
 
   let y = contentTopYFirst;
 
-  type Line = { label: string; value: string; bold: boolean };
+  type Line = { label: string; value: string; bold: boolean; lineAbove?: boolean };
 
   function newPage() {
     if (secondTemplatePage && !secondTemplateUsed) {
@@ -331,7 +339,10 @@ export async function generateIndexationPdf(
   const introParagraph =
     "gemäß den Regelungen Ihres Mietvertrages wird die Miete an die Entwicklung des Verbraucherpreisindexes (VPI) angepasst. " +
     "Grundlage der Anpassung ist die Veränderung des Indexstandes gegenüber dem zuletzt berücksichtigten Index. " +
-    "Auf Basis der nachstehenden Berechnung ergibt sich eine Anpassung Ihrer Miete.";
+    "Auf Basis der nachstehenden Berechnung ergibt sich eine Anpassung Ihrer Miete." +
+    (index_nebenkosten && ancillary_new != null
+      ? " Die Nebenkosten werden ebenfalls gemäß den vertraglichen Regelungen entsprechend angepasst."
+      : "");
 
   drawJustifiedParagraph(introParagraph, 10);
   y -= 10;
@@ -462,11 +473,22 @@ export async function generateIndexationPdf(
       label: "neue Miete brutto (19 % USt.)",
       value: newBruttoStr,
       bold: true,
+      lineAbove: true,
     });
   }
 
-  for (const { label, value, bold } of rentLines) {
+  const lineEndX = leftMargin + width - leftMargin * 2 - 150;
+
+  for (const { label, value, bold, lineAbove } of rentLines) {
     ensureSpace(140);
+    if (lineAbove) {
+      page.drawLine({
+        start: { x: leftMargin, y: y + 12 },
+        end: { x: lineEndX, y: y + 12 },
+        thickness: 0.75,
+        color: rgb(0, 0, 0),
+      });
+    }
     page.drawText(label, { x: leftMargin, y, size: 10, font });
     page.drawText(value, {
       x: leftMargin + labelWidthRent,
@@ -484,15 +506,17 @@ export async function generateIndexationPdf(
   let ancGross: number | null = null;
 
   if (ancillary_current != null && Number.isFinite(ancillary_current)) {
-    ancNet = ancillary_current;
-    ancGross =
-      ancillary_vat_rate === 19 ? ancillary_current * 1.19 : ancillary_current;
+    // Determine final NK amount: if indexing NK, use ancillary_new; otherwise keep current
+    const finalAncNet =
+      index_nebenkosten && ancillary_new != null && Number.isFinite(ancillary_new)
+        ? ancillary_new
+        : ancillary_current;
 
-    const ancNetStr = formatCurrencyDE(ancillary_current);
-    const ancBruttoStr =
-      ancillary_vat_rate === 19
-        ? formatCurrencyDE(ancillary_current * 1.19)
-        : null;
+    // MwSt for NK follows the same logic as rent
+    const ancHas19 = is_gross_19 || ancillary_vat_rate === 19;
+
+    ancNet = finalAncNet;
+    ancGross = ancHas19 ? finalAncNet * 1.19 : finalAncNet;
 
     y -= 12;
     ensureSpace(180);
@@ -505,25 +529,47 @@ export async function generateIndexationPdf(
     });
     y -= 18;
 
-    const ancLines: Line[] = [
-      {
-        label: "derzeitige Nebenkosten netto",
-        value: ancNetStr,
-        bold: true,
-      },
-    ];
+    const ancLines: Line[] = [];
 
-    if (ancillary_vat_rate === 19 && ancBruttoStr) {
-      ancLines.push({ label: "MwSt", value: "19,0 %", bold: false });
-      ancLines.push({
-        label: "derzeitige Nebenkosten brutto (19 % USt.)",
-        value: ancBruttoStr,
-        bold: true,
-      });
+    if (index_nebenkosten && ancillary_new != null && Number.isFinite(ancillary_new)) {
+      // Show old → new NK with delta
+      const ancOldStr = formatCurrencyDE(ancillary_current);
+      const ancDeltaAbs = ancillary_new - ancillary_current;
+      const ancDeltaStr = formatCurrencyDE(ancDeltaAbs);
+      const ancNewStr = formatCurrencyDE(ancillary_new);
+      const ancPctStr = formatPercentDE1(ancillary_applied_pct);
+
+      ancLines.push({ label: "derzeitige Nebenkosten netto", value: ancOldStr, bold: true });
+      ancLines.push({ label: `zzgl. Indexanpassung ${ancPctStr}`, value: ancDeltaStr, bold: false });
+      ancLines.push({ label: "neue Nebenkosten netto", value: ancNewStr, bold: true });
+
+      if (ancHas19) {
+        const ancNewBruttoStr = formatCurrencyDE(ancillary_new * 1.19);
+        ancLines.push({ label: "MwSt", value: "19,0 %", bold: false });
+        ancLines.push({ label: "neue Nebenkosten brutto (19 % USt.)", value: ancNewBruttoStr, bold: true, lineAbove: true });
+      }
+    } else {
+      // Non-indexed: just show current NK
+      const ancNetStr = formatCurrencyDE(ancillary_current);
+      ancLines.push({ label: "derzeitige Nebenkosten netto", value: ancNetStr, bold: true });
+
+      if (ancHas19) {
+        const ancBruttoStr = formatCurrencyDE(ancillary_current * 1.19);
+        ancLines.push({ label: "MwSt", value: "19,0 %", bold: false });
+        ancLines.push({ label: "derzeitige Nebenkosten brutto (19 % USt.)", value: ancBruttoStr, bold: true, lineAbove: true });
+      }
     }
 
-    for (const { label, value, bold } of ancLines) {
+    for (const { label, value, bold, lineAbove } of ancLines) {
       ensureSpace(140);
+      if (lineAbove) {
+        page.drawLine({
+          start: { x: leftMargin, y: y + 12 },
+          end: { x: lineEndX, y: y + 12 },
+          thickness: 0.75,
+          color: rgb(0, 0, 0),
+        });
+      }
       page.drawText(label, { x: leftMargin, y, size: 10, font });
       page.drawText(value, {
         x: leftMargin + labelWidthRent,

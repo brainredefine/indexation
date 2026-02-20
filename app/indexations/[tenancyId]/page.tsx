@@ -39,6 +39,7 @@ type TenancyRow = {
   index_kind?: string;
 
   date_end_display?: string | null;
+  current_ancillary_costs?: number | null;
 };
 
 type ApiPayload = {
@@ -60,6 +61,12 @@ type IndexationFormState = {
   effectiveDate: string; // "YYYY-MM-DD"
   referenceDate: string; // "YYYY-MM-DD" — future adjustment_date for Odoo
   comment: string;
+
+  // Nebenkosten indexation
+  indexNebenkosten: boolean;
+  oldAncillary: number | null;
+  newAncillary: number | null;
+  ancillaryAppliedPct: number | null; // decimal
 };
 
 function firstDayOfNextMonthLocal(now = new Date()): string {
@@ -100,12 +107,17 @@ export default function IndexationDetailPage({
     effectiveDate: firstDayOfNextMonthLocal(),
     referenceDate: firstDayOfNextMonthLocal(),
     comment: "",
+    indexNebenkosten: false,
+    oldAncillary: null,
+    newAncillary: null,
+    ancillaryAppliedPct: null,
   });
 
   const [sourceRow, setSourceRow] = useState<TenancyRow | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [previewing, setPreviewing] = useState(false);
   const [lastInd, setLastInd] = useState<string | null>(null);
 
   // ---------- Prefill from /api/tenancies ----------
@@ -159,6 +171,7 @@ export default function IndexationDetailPage({
           newRent,
           appliedPct,
           effectiveDate: firstDayOfNextMonthLocal(),
+          oldAncillary: row.current_ancillary_costs ?? null,
         }));
       } catch (e: any) {
         if (!cancelled) setLoadError(e?.message ?? String(e));
@@ -202,6 +215,48 @@ export default function IndexationDetailPage({
     });
   };
 
+  const handleToggleNK = (checked: boolean) => {
+    setForm((prev) => {
+      if (!checked) {
+        return { ...prev, indexNebenkosten: false, newAncillary: null, ancillaryAppliedPct: null };
+      }
+      // Auto-calculate NK from same applied_pct as rent
+      const oldAnc = prev.oldAncillary;
+      const pct = prev.appliedPct;
+      const newAnc =
+        oldAnc != null && pct != null ? +(oldAnc * (1 + pct)).toFixed(2) : null;
+      return {
+        ...prev,
+        indexNebenkosten: true,
+        newAncillary: newAnc,
+        ancillaryAppliedPct: pct,
+      };
+    });
+  };
+
+  const handleNewAncillaryChange = (value: string) => {
+    const na = value === "" ? null : Number(value);
+    setForm((prev) => {
+      const oldAnc = prev.oldAncillary ?? null;
+      const pct =
+        oldAnc != null && na != null && oldAnc > 0 ? +(na / oldAnc - 1) : prev.ancillaryAppliedPct;
+      return { ...prev, newAncillary: na, ancillaryAppliedPct: pct };
+    });
+  };
+
+  const handleAncillaryPctChange = (value: string) => {
+    const pct = value === "" ? null : Number(value) / 100;
+    setForm((prev) => {
+      const oldAnc = prev.oldAncillary ?? null;
+      const newAnc =
+        oldAnc != null && pct != null ? +(oldAnc * (1 + pct)).toFixed(2) : prev.newAncillary;
+      return { ...prev, ancillaryAppliedPct: pct, newAncillary: newAnc };
+    });
+  };
+
+  const ancPctDisplay =
+    form.ancillaryAppliedPct != null ? (form.ancillaryAppliedPct * 100).toFixed(2) : "";
+
   const pctDisplay =
     form.appliedPct != null ? (form.appliedPct * 100).toFixed(2) : "";
 
@@ -216,6 +271,13 @@ export default function IndexationDetailPage({
       `Increase: ${
         form.appliedPct != null ? (form.appliedPct * 100).toFixed(2) + "%" : "\u2014"
       }`,
+      form.indexNebenkosten
+        ? `NK indexed: ${form.oldAncillary ?? "?"} → ${form.newAncillary ?? "?"} (${
+            form.ancillaryAppliedPct != null
+              ? (form.ancillaryAppliedPct * 100).toFixed(2) + "%"
+              : "\u2014"
+          })`
+        : "",
       `Effective date: ${form.effectiveDate}`,
       form.referenceDate !== form.effectiveDate
         ? `Future reference date: ${form.referenceDate}`
@@ -244,7 +306,7 @@ export default function IndexationDetailPage({
     window.open(url, "_blank");
   }
 
-  const handleConfirm = async () => {
+  const callConfirmApi = async (dryRun: boolean) => {
     if (!sourceRow) {
       alert("Missing tenancy data.");
       return;
@@ -265,8 +327,12 @@ export default function IndexationDetailPage({
     }
 
     try {
-      setSubmitting(true);
-      setLastInd(null);
+      if (dryRun) {
+        setPreviewing(true);
+      } else {
+        setSubmitting(true);
+      }
+      if (!dryRun) setLastInd(null);
 
       const res = await fetch("/api/indexations/confirm", {
         method: "POST",
@@ -281,6 +347,11 @@ export default function IndexationDetailPage({
           comment: form.comment,
           ui_row: sourceRow,
           return_pdf: true,
+          dry_run: dryRun,
+          // Nebenkosten indexation
+          index_nebenkosten: form.indexNebenkosten,
+          new_ancillary: form.indexNebenkosten ? form.newAncillary : null,
+          ancillary_applied_pct: form.indexNebenkosten ? form.ancillaryAppliedPct : null,
         }),
       });
 
@@ -291,23 +362,34 @@ export default function IndexationDetailPage({
         return;
       }
 
-      setLastInd(json.ind ?? null);
+      if (!dryRun) {
+        setLastInd(json.ind ?? null);
+      }
 
       if (json.pdf_base64) {
         downloadPdfFromBase64(
           json.pdf_base64,
-          json.pdf_file_name || "indexation.pdf"
+          json.pdf_file_name || (dryRun ? "preview.pdf" : "indexation.pdf")
         );
       }
 
-      alert(`Indexation saved.\nIND: ${json.ind ?? "\u2014"}`);
+      if (!dryRun) {
+        alert(`Indexation saved.\nIND: ${json.ind ?? "\u2014"}`);
+      }
     } catch (e: any) {
       console.error(e);
       alert(`Unexpected error: ${e?.message ?? String(e)}`);
     } finally {
-      setSubmitting(false);
+      if (dryRun) {
+        setPreviewing(false);
+      } else {
+        setSubmitting(false);
+      }
     }
   };
+
+  const handlePreview = () => callConfirmApi(true);
+  const handleConfirm = () => callConfirmApi(false);
 
   const handleBackToList = () => {
     if (typeof window !== "undefined") {
@@ -317,77 +399,111 @@ export default function IndexationDetailPage({
 
   if (!Number.isFinite(tenancyId)) {
     return (
-      <div className="p-6 text-sm text-red-600">
-        Invalid tenancy ID.
+      <div className="min-h-screen bg-[#f5f6f8] flex items-center justify-center">
+        <div className="bg-white rounded-xl border border-red-200 px-6 py-4 text-sm text-red-600 shadow-sm">
+          Invalid tenancy ID.
+        </div>
       </div>
     );
   }
 
   if (loading) {
     return (
-      <div className="p-6 text-sm text-gray-800">
-        Loading…
+      <div className="min-h-screen bg-[#f5f6f8] flex items-center justify-center">
+        <div className="flex items-center gap-3 text-sm text-gray-500">
+          <svg className="animate-spin h-4 w-4 text-gray-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+          </svg>
+          Loading tenancy data…
+        </div>
       </div>
     );
   }
 
   if (loadError) {
     return (
-      <div className="p-6 text-sm text-red-600">
-        Loading error: {loadError}
+      <div className="min-h-screen bg-[#f5f6f8] flex items-center justify-center">
+        <div className="bg-white rounded-xl border border-red-200 px-6 py-4 shadow-sm max-w-md">
+          <p className="text-sm font-medium text-red-600 mb-1">Failed to load</p>
+          <p className="text-xs text-red-500">{loadError}</p>
+        </div>
       </div>
     );
   }
 
+  const rentDelta =
+    form.oldRent != null && form.newRent != null
+      ? form.newRent - form.oldRent
+      : null;
+
   return (
-    <main className="min-h-screen w-full bg-gray-100 p-6">
-      <div className="max-w-3xl mx-auto space-y-6">
-        {/* Header */}
-        <header className="flex items-start justify-between gap-4">
-          <div className="space-y-1">
-            <h1 className="text-2xl font-semibold text-gray-900">
-              Indexation for tenancy #{form.tenancyId}
+    <main className="min-h-screen w-full bg-[#f5f6f8]">
+      {/* Top bar */}
+      <div className="sticky top-0 z-10 bg-white/80 backdrop-blur border-b border-gray-200">
+        <div className="max-w-3xl mx-auto px-6 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-3 min-w-0">
+            <button
+              type="button"
+              onClick={handleBackToList}
+              className="shrink-0 flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-900 transition"
+            >
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" className="shrink-0">
+                <path d="M10 12L6 8l4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
+              Back
+            </button>
+            <div className="h-4 w-px bg-gray-200" />
+            <h1 className="text-sm font-semibold text-gray-900 truncate">
+              Tenancy #{form.tenancyId}
             </h1>
-
-            {form.propertyLabel && (
-              <p className="text-xs text-gray-700">
-                Property: {form.propertyLabel}
-              </p>
-            )}
-
             {refMonth && (
-              <p className="text-xs text-gray-700">
-                Reference month: <span className="font-mono">{refMonth}</span>
-              </p>
-            )}
-
-            {lastInd && (
-              <p className="text-xs text-emerald-700">
-                Last IND generated:{" "}
-                <span className="font-mono">{lastInd}</span>
-              </p>
+              <span className="hidden sm:inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-mono text-gray-500">
+                ref {refMonth}
+              </span>
             )}
           </div>
+          {lastInd && (
+            <span className="inline-flex items-center rounded-full bg-emerald-50 border border-emerald-200 px-2.5 py-0.5 text-[11px] font-mono text-emerald-700">
+              {lastInd}
+            </span>
+          )}
+        </div>
+      </div>
 
-          <button
-            type="button"
-            onClick={handleBackToList}
-            className="px-3 py-1.5 rounded-lg border border-gray-500 bg-white text-xs font-medium text-gray-900 hover:bg-gray-100"
-          >
-            Back to indexation list
-          </button>
-        </header>
+      <div className="max-w-3xl mx-auto px-6 py-8 space-y-6">
+        {/* Context banner */}
+        {(form.propertyLabel || form.tenancyName) && (
+          <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs text-gray-500">
+            {form.propertyLabel && (
+              <span>
+                <span className="text-gray-400">Property</span>{" "}
+                <span className="text-gray-700 font-medium">{form.propertyLabel}</span>
+              </span>
+            )}
+            {form.tenancyName && (
+              <span>
+                <span className="text-gray-400">Tenant</span>{" "}
+                <span className="text-gray-700 font-medium">{form.tenancyName}</span>
+              </span>
+            )}
+          </div>
+        )}
 
-        {/* Main form block */}
-        <section className="space-y-4 rounded-2xl border border-gray-300 bg-white p-4 shadow-sm">
-          <div className="grid grid-cols-2 gap-4 text-sm">
+        {/* ── Rent section ── */}
+        <section className="rounded-xl bg-white border border-gray-200 shadow-sm overflow-hidden">
+          <div className="px-5 py-3 border-b border-gray-100 bg-gray-50/60">
+            <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Rent indexation</h2>
+          </div>
+          <div className="p-5 grid grid-cols-2 gap-x-5 gap-y-4 text-sm">
+            {/* Old rent */}
             <div>
-              <label className="block text-xs text-gray-700 mb-1">
+              <label className="block text-[11px] font-medium text-gray-400 uppercase tracking-wide mb-1.5">
                 Old rent (net)
               </label>
               <input
                 type="number"
-                className="w-full border border-gray-400 rounded px-2 py-1 text-sm text-gray-900"
+                className="w-full rounded-lg border border-gray-200 bg-gray-50/50 px-3 py-2 text-sm text-gray-900 outline-none focus:border-gray-400 focus:ring-1 focus:ring-gray-200 transition"
                 value={form.oldRent ?? ""}
                 onChange={(e) =>
                   handleChange(
@@ -398,88 +514,228 @@ export default function IndexationDetailPage({
               />
             </div>
 
+            {/* New rent */}
             <div>
-              <label className="block text-xs text-gray-700 mb-1">
+              <label className="block text-[11px] font-medium text-gray-400 uppercase tracking-wide mb-1.5">
                 New rent (net)
               </label>
               <input
                 type="number"
-                className="w-full border border-gray-400 rounded px-2 py-1 text-sm text-gray-900"
+                className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-900 outline-none focus:border-gray-400 focus:ring-1 focus:ring-gray-200 transition"
                 value={form.newRent ?? ""}
                 onChange={(e) => handleNewRentChange(e.target.value)}
               />
             </div>
 
+            {/* % applied */}
             <div>
-              <label className="block text-xs text-gray-700 mb-1">
+              <label className="block text-[11px] font-medium text-gray-400 uppercase tracking-wide mb-1.5">
                 % applied
               </label>
-              <div className="flex items-center gap-1">
+              <div className="relative">
                 <input
                   type="number"
-                  className="w-full border border-gray-400 rounded px-2 py-1 text-sm text-gray-900"
+                  className="w-full rounded-lg border border-gray-200 px-3 py-2 pr-8 text-sm text-gray-900 outline-none focus:border-gray-400 focus:ring-1 focus:ring-gray-200 transition"
                   value={pctDisplay}
                   onChange={(e) => handlePctChange(e.target.value)}
                 />
-                <span className="text-sm text-gray-900">%</span>
+                <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-400">%</span>
               </div>
             </div>
 
+            {/* Delta badge */}
+            <div className="flex items-end pb-1">
+              {rentDelta != null && (
+                <div className={`inline-flex items-center gap-1 rounded-lg px-3 py-2 text-sm font-medium ${
+                  rentDelta > 0
+                    ? "bg-emerald-50 text-emerald-700"
+                    : rentDelta < 0
+                    ? "bg-red-50 text-red-600"
+                    : "bg-gray-50 text-gray-500"
+                }`}>
+                  {rentDelta > 0 ? "+" : ""}
+                  {rentDelta.toLocaleString("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €
+                </div>
+              )}
+            </div>
+          </div>
+        </section>
+
+        {/* ── Dates section ── */}
+        <section className="rounded-xl bg-white border border-gray-200 shadow-sm overflow-hidden">
+          <div className="px-5 py-3 border-b border-gray-100 bg-gray-50/60">
+            <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Dates</h2>
+          </div>
+          <div className="p-5 grid grid-cols-2 gap-x-5 gap-y-4 text-sm">
             <div>
-              <label className="block text-xs text-gray-700 mb-1">
+              <label className="block text-[11px] font-medium text-gray-400 uppercase tracking-wide mb-1.5">
                 Effective date
               </label>
               <input
                 type="date"
-                className="w-full border border-gray-400 rounded px-2 py-1 text-sm text-gray-900"
+                className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-900 outline-none focus:border-gray-400 focus:ring-1 focus:ring-gray-200 transition"
                 value={form.effectiveDate}
                 onChange={(e) => handleChange("effectiveDate", e.target.value)}
               />
             </div>
-
             <div>
-              <label className="block text-xs text-gray-700 mb-1">
+              <label className="block text-[11px] font-medium text-gray-400 uppercase tracking-wide mb-1.5">
                 Future reference date
               </label>
               <input
                 type="date"
-                className="w-full border border-gray-400 rounded px-2 py-1 text-sm text-gray-900"
+                className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-900 outline-none focus:border-gray-400 focus:ring-1 focus:ring-gray-200 transition"
                 value={form.referenceDate}
                 onChange={(e) => handleChange("referenceDate", e.target.value)}
               />
-              <p className="text-[10px] text-gray-500 mt-0.5">
-                Next indexation reference in Odoo (defaults to effective date)
+              <p className="text-[10px] text-gray-400 mt-1">
+                Next indexation reference in Odoo
               </p>
             </div>
           </div>
+        </section>
 
-          <div className="mt-4">
-            <label className="block text-xs text-gray-700 mb-1">
-              Indexation comment
+        {/* ── Nebenkosten section ── */}
+        <section className="rounded-xl bg-white border border-gray-200 shadow-sm overflow-hidden">
+          <div className="px-5 py-3 border-b border-gray-100 bg-gray-50/60 flex items-center justify-between">
+            <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Nebenkosten</h2>
+            <label className="flex items-center gap-2 cursor-pointer select-none">
+              <span className="text-[11px] text-gray-500">Indexieren</span>
+              <div className="relative">
+                <input
+                  type="checkbox"
+                  checked={form.indexNebenkosten}
+                  onChange={(e) => handleToggleNK(e.target.checked)}
+                  className="sr-only peer"
+                />
+                <div className="w-8 h-[18px] bg-gray-200 rounded-full peer-checked:bg-gray-900 transition-colors" />
+                <div className="absolute left-0.5 top-0.5 w-[14px] h-[14px] bg-white rounded-full shadow-sm peer-checked:translate-x-[14px] transition-transform" />
+              </div>
             </label>
+          </div>
+
+          {!form.indexNebenkosten && form.oldAncillary != null && (
+            <div className="px-5 py-4 text-sm text-gray-500">
+              Current NK netto:{" "}
+              <span className="font-medium text-gray-700">
+                {form.oldAncillary.toLocaleString("de-DE", { minimumFractionDigits: 2 })} €
+              </span>
+            </div>
+          )}
+
+          {form.indexNebenkosten && (
+            <div className="p-5 grid grid-cols-3 gap-x-5 gap-y-4 text-sm">
+              <div>
+                <label className="block text-[11px] font-medium text-gray-400 uppercase tracking-wide mb-1.5">
+                  Old NK (net)
+                </label>
+                <input
+                  type="number"
+                  className="w-full rounded-lg border border-gray-200 bg-gray-50/50 px-3 py-2 text-sm text-gray-500 outline-none cursor-default"
+                  value={form.oldAncillary ?? ""}
+                  readOnly
+                  tabIndex={-1}
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-medium text-gray-400 uppercase tracking-wide mb-1.5">
+                  New NK (net)
+                </label>
+                <input
+                  type="number"
+                  className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-900 outline-none focus:border-gray-400 focus:ring-1 focus:ring-gray-200 transition"
+                  value={form.newAncillary ?? ""}
+                  onChange={(e) => handleNewAncillaryChange(e.target.value)}
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-medium text-gray-400 uppercase tracking-wide mb-1.5">
+                  % NK applied
+                </label>
+                <div className="relative">
+                  <input
+                    type="number"
+                    className="w-full rounded-lg border border-gray-200 px-3 py-2 pr-8 text-sm text-gray-900 outline-none focus:border-gray-400 focus:ring-1 focus:ring-gray-200 transition"
+                    value={ancPctDisplay}
+                    onChange={(e) => handleAncillaryPctChange(e.target.value)}
+                  />
+                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-400">%</span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {!form.indexNebenkosten && form.oldAncillary == null && (
+            <div className="px-5 py-4 text-xs text-gray-400 italic">
+              No ancillary costs found for this tenancy.
+            </div>
+          )}
+        </section>
+
+        {/* ── Comment ── */}
+        <section className="rounded-xl bg-white border border-gray-200 shadow-sm overflow-hidden">
+          <div className="px-5 py-3 border-b border-gray-100 bg-gray-50/60">
+            <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Comment</h2>
+          </div>
+          <div className="p-5">
             <textarea
-              className="w-full border border-gray-400 rounded px-2 py-1 text-sm text-gray-900 min-h-[80px]"
+              className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-900 outline-none focus:border-gray-400 focus:ring-1 focus:ring-gray-200 transition min-h-[80px] resize-y"
+              placeholder="Optional indexation comment…"
               value={form.comment}
               onChange={(e) => handleChange("comment", e.target.value)}
             />
           </div>
         </section>
 
-        {/* Preview + actions */}
-        <section className="grid grid-cols-1 gap-4 md:grid-cols-2">
-          <div className="rounded-2xl border border-gray-300 bg-white p-4 shadow-sm text-xs whitespace-pre-wrap text-gray-900">
-            <div className="font-semibold mb-2">Plain text preview</div>
-            {previewText}
+        {/* ── Summary + Actions ── */}
+        <section className="rounded-xl bg-white border border-gray-200 shadow-sm overflow-hidden">
+          <div className="px-5 py-3 border-b border-gray-100 bg-gray-50/60">
+            <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Summary</h2>
+          </div>
+          <div className="p-5">
+            <pre className="text-xs text-gray-600 font-mono whitespace-pre-wrap leading-relaxed bg-gray-50 rounded-lg p-4 border border-gray-100">
+              {previewText}
+            </pre>
           </div>
 
-          <div className="flex flex-col gap-3">
+          {/* Action buttons */}
+          <div className="px-5 py-4 border-t border-gray-100 bg-gray-50/40 flex items-center gap-3 justify-end">
+            <button
+              type="button"
+              onClick={handlePreview}
+              disabled={previewing || submitting}
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40 transition shadow-sm"
+            >
+              {previewing ? (
+                <svg className="animate-spin h-3.5 w-3.5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                </svg>
+              ) : (
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                  <path d="M2 2h12v12H2z" stroke="currentColor" strokeWidth="1.2"/>
+                  <path d="M5 5h6M5 8h6M5 11h3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/>
+                </svg>
+              )}
+              {previewing ? "Generating…" : "Preview PDF"}
+            </button>
             <button
               type="button"
               onClick={handleConfirm}
-              disabled={submitting}
-              className="px-3 py-2 rounded-lg bg-black text-white text-sm disabled:opacity-50"
+              disabled={submitting || previewing}
+              className="inline-flex items-center gap-2 px-5 py-2 rounded-lg bg-gray-900 text-sm font-medium text-white hover:bg-gray-800 disabled:opacity-40 transition shadow-sm"
             >
-              {submitting ? "Saving indexation…" : "Confirm indexation"}
+              {submitting ? (
+                <svg className="animate-spin h-3.5 w-3.5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                </svg>
+              ) : (
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                  <path d="M13.5 4.5L6.5 11.5L2.5 7.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+              )}
+              {submitting ? "Saving…" : "Confirm indexation"}
             </button>
           </div>
         </section>
