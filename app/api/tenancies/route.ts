@@ -169,8 +169,8 @@ export async function GET(request: NextRequest) {
       const company = (p.company_id ?? null) as OdooM2O | null;
       salesByProp.set(p.id, sales);
 
-      const companyName = company && company[1] ? String(company[1]) : "";
-      if (companyName === "Fund IV" || companyName === "Eagle") {
+      const companyName = company && company[1] ? String(company[1]).toLowerCase() : "";
+      if (companyName.includes("iv") || companyName.includes("eag")) {
         allowedCompanyByProp.add(p.id);
       }
     }
