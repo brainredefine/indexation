@@ -657,7 +657,9 @@ export async function generateIndexationPdf(
     "",
     "Mit freundlichen Grüßen",
     "",
-    "i.A. Jakob Webb",
+    "i.A. Nadine Köhler",
+    "",
+    "Dieses Schreiben wurde elektronisch erstellt und ist daher ohne Unterschrift gültig."
   ];
 
   for (const line of closingLines) {
