@@ -524,7 +524,7 @@ export async function POST(req: NextRequest) {
           odooUpdateStatus.wrote_rent = await odoo.executeKw<boolean>(
             "property.rent",
             "write",
-            [[rentId], { rent: new_rent }]
+            [[rentId], { rent: new_rent, date_start: effective_date }]
           );
         } else {
           console.warn(`Odoo: property.rent introuvable pour tenancy_id ${tenancy_id}`);
