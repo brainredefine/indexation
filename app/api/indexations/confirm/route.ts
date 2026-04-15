@@ -532,7 +532,7 @@ export async function POST(req: NextRequest) {
         odooUpdateStatus.wrote_adjustment_date = await odoo.executeKw<boolean>(
           "property.tenancy",
           "write",
-          [[tenancy_id], { adjustment_date: reference_date }]
+          [[tenancy_id], { adjustment_date: reference_date, last_rent_increase: effective_date }]
         );
       } catch (err: any) {
         console.error("Erreur lors de la mise à jour Odoo:", err);
