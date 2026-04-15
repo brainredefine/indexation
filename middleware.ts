@@ -19,7 +19,7 @@ export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
   if (
     pathname.startsWith("/_next") ||
-    pathname.startsWith("/api/")
+    pathname.startsWith("/api/") ||
     pathname.startsWith("/favicon.ico") ||
     pathname.match(/\.(png|jpg|jpeg|gif|svg|webp|css|js|ico|txt|map)$/)
   ) {
