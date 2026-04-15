@@ -372,9 +372,15 @@ export default function IndexationDetailPage({
           json.pdf_file_name || (dryRun ? "preview.pdf" : "indexation.pdf")
         );
       }
-
+      const odoo = json.odoo_update;
       if (!dryRun) {
-        alert(`Indexation saved.\nIND: ${json.ind ?? "\u2014"}`);
+        alert(
+  `Indexation saved.\nIND: ${json.ind ?? "\u2014"}\n` +
+  `\nOdoo rent record: ${odoo?.rent_record_id ?? "NOT FOUND"}\n` +
+  `Wrote rent: ${odoo?.wrote_rent ?? "?"}\n` +
+  `Wrote adjustment_date: ${odoo?.wrote_adjustment_date ?? "?"}\n` +
+  `Odoo error: ${odoo?.error ?? "none"}`
+);
       }
     } catch (e: any) {
       console.error(e);
