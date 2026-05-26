@@ -24,6 +24,10 @@ type Body = {
   index_nebenkosten?: boolean;
   new_ancillary?: number | null;
   ancillary_applied_pct?: number | null; // decimal
+  // Heizkosten indexation
+  index_heating?: boolean;
+  new_heating?: number | null;
+  heating_applied_pct?: number | null; // decimal
 };
 function getDataSupabase() {
   const url = process.env.SUPABASE_URL_DATA!;
@@ -87,6 +91,11 @@ export async function POST(req: NextRequest) {
     const bodyNewAncillary = body.new_ancillary ?? null;
     const bodyAncillaryPct = body.ancillary_applied_pct ?? null;
 
+    // Heizkosten indexation params
+    const indexHeating = Boolean(body.index_heating);
+    const bodyNewHeating = body.new_heating ?? null;
+    const bodyHeatingPct = body.heating_applied_pct ?? null;
+
     if (!Number.isFinite(tenancy_id) || tenancy_id <= 0) {
       return NextResponse.json({ ok: false, error: "tenancy_id invalide" }, { status: 400 });
     }
@@ -107,7 +116,7 @@ export async function POST(req: NextRequest) {
       ? effDateObj.getUTCFullYear()
       : new Date().getUTCFullYear();
     // ------------------------------------------------------------------
-    // 1) Lire property.tenancy (pour property, partner, vat rent, ancillary)
+    // 1) Lire property.tenancy (pour property, partner, vat rent, ancillary, heating)
     // ------------------------------------------------------------------
     const tenancies = await odoo.executeKw<
       Array<{
@@ -118,6 +127,7 @@ export async function POST(req: NextRequest) {
         name?: string | null;
         current_ancillary_costs?: number | null;
         ancillary_cost_type_id?: [number, string] | false | null;
+        current_heating_costs?: number | null;
       }>
     >("property.tenancy", "read", [
       [tenancy_id],
@@ -128,6 +138,7 @@ export async function POST(req: NextRequest) {
         "name",
         "current_ancillary_costs",
         "ancillary_cost_type_id",
+        "current_heating_costs",
       ],
     ]);
     const tenancyRec = tenancies?.[0];
@@ -336,6 +347,32 @@ export async function POST(req: NextRequest) {
     }
 
     // ------------------------------------------------------------------
+    // 6c) Heating costs (Heizkosten)
+    // ------------------------------------------------------------------
+    const heating_current =
+      typeof tenancyRec.current_heating_costs === "number"
+        ? tenancyRec.current_heating_costs
+        : null;
+
+    let heatingNew: number | null = null;
+    let heatingAppliedPct: number | null = null;
+
+    if (indexHeating && heating_current != null) {
+      if (bodyNewHeating != null && Number.isFinite(bodyNewHeating)) {
+        heatingNew = bodyNewHeating;
+        heatingAppliedPct =
+          bodyHeatingPct != null
+            ? bodyHeatingPct
+            : heating_current > 0
+              ? heatingNew / heating_current - 1
+              : null;
+      } else if (applied_pct != null) {
+        heatingNew = +(heating_current * (1 + applied_pct)).toFixed(2);
+        heatingAppliedPct = applied_pct;
+      }
+    }
+
+    // ------------------------------------------------------------------
     // 7) Génération UUID de la tenancy
     // ------------------------------------------------------------------
     const tenancy_uuid = `${tenancy_id}`;
@@ -467,6 +504,11 @@ export async function POST(req: NextRequest) {
       index_nebenkosten: indexNebenkosten,
       ancillary_new: ancillaryNew,
       ancillary_applied_pct: ancillaryAppliedPct,
+      // Heizkosten
+      heating_current,
+      index_heating: indexHeating,
+      heating_new: heatingNew,
+      heating_applied_pct: heatingAppliedPct,
     };
     const pdfBytes = await generateIndexationPdf(pdfParams);
     const wantPdf = Boolean(body.return_pdf);
@@ -501,11 +543,13 @@ export async function POST(req: NextRequest) {
     }
 
     // ------------------------------------------------------------------
-    // 12) Odoo : update rent + adjustment_date (skip in dry_run)
+    // 12) Odoo : update rent + ancillary + heating + adjustment_date (skip in dry_run)
     // ------------------------------------------------------------------
     let odooUpdateStatus = {
       rent_record_id: null as number | null,
       wrote_rent: false,
+      wrote_ancillary: false,
+      wrote_heating: false,
       wrote_adjustment_date: false,
       error: null as string | null,
     };
@@ -521,11 +565,33 @@ export async function POST(req: NextRequest) {
         if (Array.isArray(rentIds) && rentIds.length > 0) {
           const rentId = rentIds[0];
           odooUpdateStatus.rent_record_id = rentId;
+
+          // Build the write payload: always rent + date_start, conditionally NK + heating
+          const rentWritePayload: Record<string, any> = {
+            rent: new_rent,
+            date_start: effective_date,
+          };
+
+          if (indexNebenkosten && ancillaryNew != null && Number.isFinite(ancillaryNew)) {
+            rentWritePayload.ancillary_costs = ancillaryNew;
+          }
+          if (indexHeating && heatingNew != null && Number.isFinite(heatingNew)) {
+            rentWritePayload.heating_costs = heatingNew;
+          }
+
           odooUpdateStatus.wrote_rent = await odoo.executeKw<boolean>(
             "property.rent",
             "write",
-            [[rentId], { rent: new_rent, date_start: effective_date }]
+            [[rentId], rentWritePayload]
           );
+
+          // Track which fields were actually included in the write
+          if ("ancillary_costs" in rentWritePayload) {
+            odooUpdateStatus.wrote_ancillary = odooUpdateStatus.wrote_rent;
+          }
+          if ("heating_costs" in rentWritePayload) {
+            odooUpdateStatus.wrote_heating = odooUpdateStatus.wrote_rent;
+          }
         } else {
           console.warn(`Odoo: property.rent introuvable pour tenancy_id ${tenancy_id}`);
         }
