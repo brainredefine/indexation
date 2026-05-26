@@ -277,17 +277,19 @@ export async function POST(req: NextRequest) {
       propertyLabelForPdf = String(tenancyRec.main_property_id[1] ?? tenancyRec.main_property_id[0]);
     }
     // ------------------------------------------------------------------
-    // 5) TVA Loyer
+    // 5) TVA Loyer (DEBUG)
     // ------------------------------------------------------------------
     let isGross19 = false;
+    let vatDebug: any = null;
     if (tenancyRec.rent_product_id && Array.isArray(tenancyRec.rent_product_id)) {
       const rentProdId = tenancyRec.rent_product_id[0];
       const rentProds = await odoo.executeKw<
         Array<{
           id: number;
+          name?: string | null;
           taxes_id?: number[] | false | null;
         }>
-      >("product.product", "read", [[rentProdId], ["taxes_id"]]);
+      >("product.product", "read", [[rentProdId], ["name", "taxes_id"]]);
       const rentProd = rentProds?.[0];
       if (rentProd) {
         const taxIds = rentProd.taxes_id;
@@ -295,17 +297,39 @@ export async function POST(req: NextRequest) {
           const taxes = await odoo.executeKw<
             Array<{
               id: number;
+              name?: string | null;
               amount_type?: string | null;
               amount?: number | null;
+              company_id?: [number, string] | false | null;
             }>
-          >("account.tax", "read", [taxIds, ["amount_type", "amount"]]);
+          >("account.tax", "read", [taxIds, ["name", "amount_type", "amount", "company_id"]]);
           const tax19 = taxes.find(
             (t) => t.amount_type === "percent" && Math.abs((t.amount ?? 0) - 19) < 0.01
           );
           if (tax19) isGross19 = true;
+          vatDebug = {
+            rent_product_id: rentProdId,
+            rent_product_name: rentProd.name,
+            tax_ids: taxIds,
+            taxes_resolved: taxes,
+            detected_isGross19: isGross19,
+          };
+        } else {
+          vatDebug = {
+            rent_product_id: rentProdId,
+            rent_product_name: rentProd.name,
+            tax_ids: taxIds,
+            note: "no taxes attached",
+          };
         }
+      } else {
+        vatDebug = { note: "rent_product not found", rent_product_id: rentProdId };
       }
+    } else {
+      vatDebug = { note: "no rent_product_id on tenancy" };
     }
+    console.log("VAT DEBUG:", JSON.stringify(vatDebug, null, 2));
+
     // ------------------------------------------------------------------
     // 6) Ancillary costs
     // ------------------------------------------------------------------
@@ -618,6 +642,7 @@ export async function POST(req: NextRequest) {
       pdf_upload_error: pdfUploadError,
       pdf_file_name: fileName,
       pdf_base64,
+      vat_debug: vatDebug,
       ...(dryRun
         ? {}
         : {
