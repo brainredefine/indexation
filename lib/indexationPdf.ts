@@ -31,6 +31,12 @@ export type IndexationPdfParams = {
   index_nebenkosten: boolean;
   ancillary_new: number | null;        // new NK netto after indexation
   ancillary_applied_pct: number | null; // decimal, e.g. 0.034
+
+  // Heizkosten (optional)
+  heating_current: number | null;       // netto
+  index_heating: boolean;
+  heating_new: number | null;           // new heating netto after indexation
+  heating_applied_pct: number | null;   // decimal
 };
 
 function formatDateGerman(d: string): string {
@@ -86,6 +92,10 @@ export async function generateIndexationPdf(
     index_nebenkosten,
     ancillary_new,
     ancillary_applied_pct,
+    heating_current,
+    index_heating,
+    heating_new,
+    heating_applied_pct,
   } = params;
 
   const pdfDoc = await PDFDocument.create();
@@ -288,15 +298,15 @@ export async function generateIndexationPdf(
   // Berlin + date – À GAUCHE MAINTENANT - DATE DU JOUR (pas effective_date)
   // ---------------------------------------------------------------------------
   ensureSpace(120);
-  
+
   // ✅ Date du jour pour la lettre
   const today = new Date();
   const todayStr = formatDateGerman(today.toISOString().slice(0, 10));
   const dateText = `Berlin, ${todayStr}`;
-  
+
   // ✅ CHANGEMENT ICI : on met le texte à gauche
   const dateX = leftMargin;
-  
+
   page.drawText(dateText, {
     x: dateX,
     y,
@@ -336,13 +346,28 @@ export async function generateIndexationPdf(
   });
   y -= 18;
 
+  const indexingNkAndHeating =
+    (index_nebenkosten && ancillary_new != null) &&
+    (index_heating && heating_new != null);
+  const indexingNkOnly =
+    index_nebenkosten && ancillary_new != null && !(index_heating && heating_new != null);
+  const indexingHeatingOnly =
+    index_heating && heating_new != null && !(index_nebenkosten && ancillary_new != null);
+
+  let extraSentence = "";
+  if (indexingNkAndHeating) {
+    extraSentence = " Die Nebenkosten und Heizkosten werden ebenfalls gemäß den vertraglichen Regelungen entsprechend angepasst.";
+  } else if (indexingNkOnly) {
+    extraSentence = " Die Nebenkosten werden ebenfalls gemäß den vertraglichen Regelungen entsprechend angepasst.";
+  } else if (indexingHeatingOnly) {
+    extraSentence = " Die Heizkosten werden ebenfalls gemäß den vertraglichen Regelungen entsprechend angepasst.";
+  }
+
   const introParagraph =
     "gemäß den Regelungen Ihres Mietvertrages wird die Miete an die Entwicklung des Verbraucherpreisindexes (VPI) angepasst. " +
     "Grundlage der Anpassung ist die Veränderung des Indexstandes gegenüber dem zuletzt berücksichtigten Index. " +
     "Auf Basis der nachstehenden Berechnung ergibt sich eine Anpassung Ihrer Miete." +
-    (index_nebenkosten && ancillary_new != null
-      ? " Die Nebenkosten werden ebenfalls gemäß den vertraglichen Regelungen entsprechend angepasst."
-      : "");
+    extraSentence;
 
   drawJustifiedParagraph(introParagraph, 10);
   y -= 10;
@@ -582,14 +607,103 @@ export async function generateIndexationPdf(
   }
 
   // ---------------------------------------------------------------------------
+  // Bloc Heizkosten – police 10
+  // ---------------------------------------------------------------------------
+  let heatNet: number | null = null;
+  let heatGross: number | null = null;
+
+  if (heating_current != null && Number.isFinite(heating_current)) {
+    // Determine final heating amount: if indexing heating, use heating_new; otherwise keep current
+    const finalHeatNet =
+      index_heating && heating_new != null && Number.isFinite(heating_new)
+        ? heating_new
+        : heating_current;
+
+    // MwSt for heating follows the same logic as rent
+    const heatHas19 = is_gross_19;
+
+    heatNet = finalHeatNet;
+    heatGross = heatHas19 ? finalHeatNet * 1.19 : finalHeatNet;
+
+    y -= 12;
+    ensureSpace(180);
+
+    page.drawText("Heizkosten:", {
+      x: leftMargin,
+      y,
+      size: 10,
+      font: fontBold,
+    });
+    y -= 18;
+
+    const heatLines: Line[] = [];
+
+    if (index_heating && heating_new != null && Number.isFinite(heating_new)) {
+      // Show old → new heating with delta
+      const heatOldStr = formatCurrencyDE(heating_current);
+      const heatDeltaAbs = heating_new - heating_current;
+      const heatDeltaStr = formatCurrencyDE(heatDeltaAbs);
+      const heatNewStr = formatCurrencyDE(heating_new);
+      const heatPctStr = formatPercentDE1(heating_applied_pct);
+
+      heatLines.push({ label: "derzeitige Heizkosten netto", value: heatOldStr, bold: true });
+      heatLines.push({ label: `zzgl. Indexanpassung ${heatPctStr}`, value: heatDeltaStr, bold: false });
+      heatLines.push({ label: "neue Heizkosten netto", value: heatNewStr, bold: true });
+
+      if (heatHas19) {
+        const heatNewBruttoStr = formatCurrencyDE(heating_new * 1.19);
+        heatLines.push({ label: "MwSt", value: "19,0 %", bold: false });
+        heatLines.push({ label: "neue Heizkosten brutto (19 % USt.)", value: heatNewBruttoStr, bold: true, lineAbove: true });
+      }
+    } else {
+      // Non-indexed: just show current heating
+      const heatNetStr = formatCurrencyDE(heating_current);
+      heatLines.push({ label: "derzeitige Heizkosten netto", value: heatNetStr, bold: true });
+
+      if (heatHas19) {
+        const heatBruttoStr = formatCurrencyDE(heating_current * 1.19);
+        heatLines.push({ label: "MwSt", value: "19,0 %", bold: false });
+        heatLines.push({ label: "derzeitige Heizkosten brutto (19 % USt.)", value: heatBruttoStr, bold: true, lineAbove: true });
+      }
+    }
+
+    for (const { label, value, bold, lineAbove } of heatLines) {
+      ensureSpace(140);
+      if (lineAbove) {
+        page.drawLine({
+          start: { x: leftMargin, y: y + 12 },
+          end: { x: lineEndX, y: y + 12 },
+          thickness: 0.75,
+          color: rgb(0, 0, 0),
+        });
+      }
+      page.drawText(label, { x: leftMargin, y, size: 10, font });
+      page.drawText(value, {
+        x: leftMargin + labelWidthRent,
+        y,
+        size: 10,
+        font: bold ? fontBold : font,
+      });
+      y -= 16;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // TOTAL BOX – toujours police 10, en bas de page
   // ---------------------------------------------------------------------------
   {
-    const totalNet = new_rent + (ancNet ?? 0);
+    const totalNet = new_rent + (ancNet ?? 0) + (heatNet ?? 0);
     const hasAny19 = is_gross_19 || ancillary_vat_rate === 19;
     const totalGross = hasAny19
-      ? (newRentBrutto ?? new_rent) + (ancGross ?? 0)
+      ? (newRentBrutto ?? new_rent) + (ancGross ?? 0) + (heatGross ?? 0)
       : null;
+
+    const hasNK = ancNet != null;
+    const hasHeat = heatNet != null;
+    let totalLabel = "Gesamtmiete netto (Miete";
+    if (hasNK) totalLabel += " + Nebenkosten";
+    if (hasHeat) totalLabel += " + Heizkosten";
+    totalLabel += ")";
 
     const linesInside = totalGross != null ? 2 : 1;
     const lineHeight = 16;
@@ -616,7 +730,7 @@ export async function generateIndexationPdf(
 
     let yy = boxTopY - paddingBox - 2;
 
-    page.drawText("Gesamtmiete netto (Miete + Nebenkosten)", {
+    page.drawText(totalLabel, {
       x: boxLeftX + 10,
       y: yy,
       size: 10,
