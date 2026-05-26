@@ -73,6 +73,27 @@ function extractTenantNo(name?: string | null): string | null {
   if (!Number.isFinite(num)) return null;
   return String(num);
 }
+
+/**
+ * Detect VAT rate (19% gross) from rent_product_id name.
+ *
+ * The product taxes_id field in Odoo is unreliable in multi-company setups
+ * (the same product can have multiple taxes attached, one per company).
+ * The product NAME is the source of truth: "Miete Gewerblich 0%" → 0%,
+ * "Miete Gewerblich 19%" → 19%.
+ *
+ * Returns true if the product is gross 19%, false otherwise.
+ */
+function detectIsGross19FromProductName(name?: string | null): boolean {
+  if (!name) return false;
+  const n = name.toLowerCase().replace(/\s+/g, "");
+  // Explicit 0% wins
+  if (n.includes("0%")) return false;
+  // 19% match
+  if (n.includes("19%")) return true;
+  return false;
+}
+
 export async function POST(req: NextRequest) {
   try {
     const body = (await req.json()) as Body;
@@ -277,58 +298,19 @@ export async function POST(req: NextRequest) {
       propertyLabelForPdf = String(tenancyRec.main_property_id[1] ?? tenancyRec.main_property_id[0]);
     }
     // ------------------------------------------------------------------
-    // 5) TVA Loyer (DEBUG)
+    // 5) TVA Loyer
+    //    Détection basée sur le NOM du rent_product_id (source de vérité).
+    //    Le champ taxes_id du produit n'est pas fiable en multi-company
+    //    (plusieurs taxes 19% peuvent être attachées, une par société).
     // ------------------------------------------------------------------
     let isGross19 = false;
-    let vatDebug: any = null;
+    let rentProductName: string | null = null;
     if (tenancyRec.rent_product_id && Array.isArray(tenancyRec.rent_product_id)) {
-      const rentProdId = tenancyRec.rent_product_id[0];
-      const rentProds = await odoo.executeKw<
-        Array<{
-          id: number;
-          name?: string | null;
-          taxes_id?: number[] | false | null;
-        }>
-      >("product.product", "read", [[rentProdId], ["name", "taxes_id"]]);
-      const rentProd = rentProds?.[0];
-      if (rentProd) {
-        const taxIds = rentProd.taxes_id;
-        if (Array.isArray(taxIds) && taxIds.length > 0) {
-          const taxes = await odoo.executeKw<
-            Array<{
-              id: number;
-              name?: string | null;
-              amount_type?: string | null;
-              amount?: number | null;
-              company_id?: [number, string] | false | null;
-            }>
-          >("account.tax", "read", [taxIds, ["name", "amount_type", "amount", "company_id"]]);
-          const tax19 = taxes.find(
-            (t) => t.amount_type === "percent" && Math.abs((t.amount ?? 0) - 19) < 0.01
-          );
-          if (tax19) isGross19 = true;
-          vatDebug = {
-            rent_product_id: rentProdId,
-            rent_product_name: rentProd.name,
-            tax_ids: taxIds,
-            taxes_resolved: taxes,
-            detected_isGross19: isGross19,
-          };
-        } else {
-          vatDebug = {
-            rent_product_id: rentProdId,
-            rent_product_name: rentProd.name,
-            tax_ids: taxIds,
-            note: "no taxes attached",
-          };
-        }
-      } else {
-        vatDebug = { note: "rent_product not found", rent_product_id: rentProdId };
-      }
-    } else {
-      vatDebug = { note: "no rent_product_id on tenancy" };
+      // The name comes directly from the m2o tuple [id, name]
+      rentProductName = String(tenancyRec.rent_product_id[1] ?? "");
+      isGross19 = detectIsGross19FromProductName(rentProductName);
     }
-    console.log("VAT DEBUG:", JSON.stringify(vatDebug, null, 2));
+    console.log("VAT detection:", { rentProductName, isGross19 });
 
     // ------------------------------------------------------------------
     // 6) Ancillary costs
@@ -642,7 +624,7 @@ export async function POST(req: NextRequest) {
       pdf_upload_error: pdfUploadError,
       pdf_file_name: fileName,
       pdf_base64,
-      vat_debug: vatDebug,
+      vat_info: { rent_product_name: rentProductName, is_gross_19: isGross19 },
       ...(dryRun
         ? {}
         : {
