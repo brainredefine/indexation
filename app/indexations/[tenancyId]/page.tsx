@@ -40,6 +40,7 @@ type TenancyRow = {
 
   date_end_display?: string | null;
   current_ancillary_costs?: number | null;
+  current_heating_costs?: number | null;
 };
 
 type ApiPayload = {
@@ -67,6 +68,12 @@ type IndexationFormState = {
   oldAncillary: number | null;
   newAncillary: number | null;
   ancillaryAppliedPct: number | null; // decimal
+
+  // Heizkosten indexation
+  indexHeating: boolean;
+  oldHeating: number | null;
+  newHeating: number | null;
+  heatingAppliedPct: number | null; // decimal
 };
 
 function firstDayOfNextMonthLocal(now = new Date()): string {
@@ -111,6 +118,10 @@ export default function IndexationDetailPage({
     oldAncillary: null,
     newAncillary: null,
     ancillaryAppliedPct: null,
+    indexHeating: false,
+    oldHeating: null,
+    newHeating: null,
+    heatingAppliedPct: null,
   });
 
   const [sourceRow, setSourceRow] = useState<TenancyRow | null>(null);
@@ -172,6 +183,7 @@ export default function IndexationDetailPage({
           appliedPct,
           effectiveDate: firstDayOfNextMonthLocal(),
           oldAncillary: row.current_ancillary_costs ?? null,
+          oldHeating: row.current_heating_costs ?? null,
         }));
       } catch (e: any) {
         if (!cancelled) setLoadError(e?.message ?? String(e));
@@ -254,8 +266,49 @@ export default function IndexationDetailPage({
     });
   };
 
+  const handleToggleHeating = (checked: boolean) => {
+    setForm((prev) => {
+      if (!checked) {
+        return { ...prev, indexHeating: false, newHeating: null, heatingAppliedPct: null };
+      }
+      const oldH = prev.oldHeating;
+      const pct = prev.appliedPct;
+      const newH =
+        oldH != null && pct != null ? +(oldH * (1 + pct)).toFixed(2) : null;
+      return {
+        ...prev,
+        indexHeating: true,
+        newHeating: newH,
+        heatingAppliedPct: pct,
+      };
+    });
+  };
+
+  const handleNewHeatingChange = (value: string) => {
+    const nh = value === "" ? null : Number(value);
+    setForm((prev) => {
+      const oldH = prev.oldHeating ?? null;
+      const pct =
+        oldH != null && nh != null && oldH > 0 ? +(nh / oldH - 1) : prev.heatingAppliedPct;
+      return { ...prev, newHeating: nh, heatingAppliedPct: pct };
+    });
+  };
+
+  const handleHeatingPctChange = (value: string) => {
+    const pct = value === "" ? null : Number(value) / 100;
+    setForm((prev) => {
+      const oldH = prev.oldHeating ?? null;
+      const newH =
+        oldH != null && pct != null ? +(oldH * (1 + pct)).toFixed(2) : prev.newHeating;
+      return { ...prev, heatingAppliedPct: pct, newHeating: newH };
+    });
+  };
+
   const ancPctDisplay =
     form.ancillaryAppliedPct != null ? (form.ancillaryAppliedPct * 100).toFixed(2) : "";
+
+  const heatPctDisplay =
+    form.heatingAppliedPct != null ? (form.heatingAppliedPct * 100).toFixed(2) : "";
 
   const pctDisplay =
     form.appliedPct != null ? (form.appliedPct * 100).toFixed(2) : "";
@@ -275,6 +328,13 @@ export default function IndexationDetailPage({
         ? `NK indexed: ${form.oldAncillary ?? "?"} → ${form.newAncillary ?? "?"} (${
             form.ancillaryAppliedPct != null
               ? (form.ancillaryAppliedPct * 100).toFixed(2) + "%"
+              : "\u2014"
+          })`
+        : "",
+      form.indexHeating
+        ? `Heizkosten indexed: ${form.oldHeating ?? "?"} → ${form.newHeating ?? "?"} (${
+            form.heatingAppliedPct != null
+              ? (form.heatingAppliedPct * 100).toFixed(2) + "%"
               : "\u2014"
           })`
         : "",
@@ -352,6 +412,10 @@ export default function IndexationDetailPage({
           index_nebenkosten: form.indexNebenkosten,
           new_ancillary: form.indexNebenkosten ? form.newAncillary : null,
           ancillary_applied_pct: form.indexNebenkosten ? form.ancillaryAppliedPct : null,
+          // Heizkosten indexation
+          index_heating: form.indexHeating,
+          new_heating: form.indexHeating ? form.newHeating : null,
+          heating_applied_pct: form.indexHeating ? form.heatingAppliedPct : null,
         }),
       });
 
@@ -378,6 +442,8 @@ export default function IndexationDetailPage({
   `Indexation saved.\nIND: ${json.ind ?? "\u2014"}\n` +
   `\nOdoo rent record: ${odoo?.rent_record_id ?? "NOT FOUND"}\n` +
   `Wrote rent: ${odoo?.wrote_rent ?? "?"}\n` +
+  `Wrote ancillary: ${odoo?.wrote_ancillary ?? "?"}\n` +
+  `Wrote heating: ${odoo?.wrote_heating ?? "?"}\n` +
   `Wrote adjustment_date: ${odoo?.wrote_adjustment_date ?? "?"}\n` +
   `Odoo error: ${odoo?.error ?? "none"}`
 );
@@ -674,6 +740,83 @@ export default function IndexationDetailPage({
           {!form.indexNebenkosten && form.oldAncillary == null && (
             <div className="px-5 py-4 text-xs text-gray-400 italic">
               No ancillary costs found for this tenancy.
+            </div>
+          )}
+        </section>
+
+        {/* ── Heizkosten section ── */}
+        <section className="rounded-xl bg-white border border-gray-200 shadow-sm overflow-hidden">
+          <div className="px-5 py-3 border-b border-gray-100 bg-gray-50/60 flex items-center justify-between">
+            <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Heizkosten</h2>
+            <label className="flex items-center gap-2 cursor-pointer select-none">
+              <span className="text-[11px] text-gray-500">Indexieren</span>
+              <div className="relative">
+                <input
+                  type="checkbox"
+                  checked={form.indexHeating}
+                  onChange={(e) => handleToggleHeating(e.target.checked)}
+                  className="sr-only peer"
+                />
+                <div className="w-8 h-[18px] bg-gray-200 rounded-full peer-checked:bg-gray-900 transition-colors" />
+                <div className="absolute left-0.5 top-0.5 w-[14px] h-[14px] bg-white rounded-full shadow-sm peer-checked:translate-x-[14px] transition-transform" />
+              </div>
+            </label>
+          </div>
+
+          {!form.indexHeating && form.oldHeating != null && (
+            <div className="px-5 py-4 text-sm text-gray-500">
+              Current Heizkosten netto:{" "}
+              <span className="font-medium text-gray-700">
+                {form.oldHeating.toLocaleString("de-DE", { minimumFractionDigits: 2 })} €
+              </span>
+            </div>
+          )}
+
+          {form.indexHeating && (
+            <div className="p-5 grid grid-cols-3 gap-x-5 gap-y-4 text-sm">
+              <div>
+                <label className="block text-[11px] font-medium text-gray-400 uppercase tracking-wide mb-1.5">
+                  Old Heizkosten (net)
+                </label>
+                <input
+                  type="number"
+                  className="w-full rounded-lg border border-gray-200 bg-gray-50/50 px-3 py-2 text-sm text-gray-500 outline-none cursor-default"
+                  value={form.oldHeating ?? ""}
+                  readOnly
+                  tabIndex={-1}
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-medium text-gray-400 uppercase tracking-wide mb-1.5">
+                  New Heizkosten (net)
+                </label>
+                <input
+                  type="number"
+                  className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-900 outline-none focus:border-gray-400 focus:ring-1 focus:ring-gray-200 transition"
+                  value={form.newHeating ?? ""}
+                  onChange={(e) => handleNewHeatingChange(e.target.value)}
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-medium text-gray-400 uppercase tracking-wide mb-1.5">
+                  % Heizkosten applied
+                </label>
+                <div className="relative">
+                  <input
+                    type="number"
+                    className="w-full rounded-lg border border-gray-200 px-3 py-2 pr-8 text-sm text-gray-900 outline-none focus:border-gray-400 focus:ring-1 focus:ring-gray-200 transition"
+                    value={heatPctDisplay}
+                    onChange={(e) => handleHeatingPctChange(e.target.value)}
+                  />
+                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-400">%</span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {!form.indexHeating && form.oldHeating == null && (
+            <div className="px-5 py-4 text-xs text-gray-400 italic">
+              No heating costs found for this tenancy.
             </div>
           )}
         </section>
