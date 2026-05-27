@@ -63,6 +63,20 @@ function addMonthsToFirstOfMonth(dateStr: string, months: number): string | null
   const mm = String(base.getUTCMonth() + 1).padStart(2, "0");
   return `${yyyy}-${mm}-01`;
 }
+
+/**
+ * Sanitize a value that should be an ISO date string or null.
+ * Odoo returns `false` for empty date fields, which would break Postgres date columns.
+ * Returns null for anything that isn't a valid non-empty string.
+ */
+function safeDate(v: unknown): string | null {
+  if (v == null) return null;
+  if (typeof v !== "string") return null;          // catches Odoo `false`, booleans, numbers
+  const trimmed = v.trim();
+  if (trimmed === "" || trimmed.toLowerCase() === "false") return null;
+  return trimmed;
+}
+
 /** "AC01 - 09 - Deichmann" -> "9" */
 function extractTenantNo(name?: string | null): string | null {
   if (!name) return null;
@@ -399,10 +413,9 @@ export async function POST(req: NextRequest) {
     if (reference_date && pause_between_indexation != null && Number.isFinite(pause_between_indexation)) {
       next_possible_indexation_date = addMonthsToFirstOfMonth(reference_date, pause_between_indexation);
     } else {
-      next_possible_indexation_date = (ui_row?.next_wait_date as string | null) ?? null;
+      next_possible_indexation_date = safeDate(ui_row?.next_wait_date);
     }
-    const end_of_contract =
-      (ui_row?.date_end_display as string | null) ?? null;
+    const end_of_contract = safeDate(ui_row?.date_end_display);
 
     // ------------------------------------------------------------------
     // 8) Insert DATA Supabase (skip in dry_run)
@@ -439,8 +452,8 @@ export async function POST(req: NextRequest) {
         next_possible_indexation_date,
         end_of_contract,
         indexation_comment: comment,
-        effective_date,
-        reference_date: reference_date ?? effective_date,
+        effective_date: safeDate(effective_date),
+        reference_date: safeDate(reference_date) ?? safeDate(effective_date),
         company_id: companyIdForInd,
         year,
       };
