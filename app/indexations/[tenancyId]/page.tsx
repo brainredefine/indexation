@@ -56,24 +56,29 @@ type IndexationFormState = {
   propertyLabel: string | null;
   tenant: string | null;
 
-  oldRent: number | null;
-  newRent: number | null;
-  appliedPct: number | null; // decimal
-  effectiveDate: string; // "YYYY-MM-DD"
-  referenceDate: string; // "YYYY-MM-DD" — future adjustment_date for Odoo
+  oldRent: number | null;            // total old rent (e.g. 3000)
+  newRent: number | null;            // total new rent that will be written to Odoo
+  appliedPct: number | null;         // decimal, % applied to indexable portion
+  effectiveDate: string;
+  referenceDate: string;
   comment: string;
+
+  // Split rent (rare case: tenant has multiple surfaces, only part is indexable)
+  splitRent: boolean;
+  indexableRent: number | null;      // portion to index (e.g. 2000)
+  nonIndexableRent: number | null;   // portion to keep flat (e.g. 1000)
 
   // Nebenkosten indexation
   indexNebenkosten: boolean;
   oldAncillary: number | null;
   newAncillary: number | null;
-  ancillaryAppliedPct: number | null; // decimal
+  ancillaryAppliedPct: number | null;
 
   // Heizkosten indexation
   indexHeating: boolean;
   oldHeating: number | null;
   newHeating: number | null;
-  heatingAppliedPct: number | null; // decimal
+  heatingAppliedPct: number | null;
 };
 
 function firstDayOfNextMonthLocal(now = new Date()): string {
@@ -90,17 +95,26 @@ function numOrNull(v: any): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+/** Recompute newRent given indexableRent, nonIndexableRent and appliedPct */
+function computeNewRent(
+  indexable: number | null,
+  nonIndexable: number | null,
+  pct: number | null
+): number | null {
+  if (indexable == null || pct == null) return null;
+  const flat = nonIndexable ?? 0;
+  return +(indexable * (1 + pct) + flat).toFixed(2);
+}
+
 export default function IndexationDetailPage({
   params,
 }: {
   params: Promise<{ tenancyId: string }>;
 }) {
-  // Next.js 15: params is a Promise in client components — unwrap with use()
   const { tenancyId: tenancyIdStr } = use(params);
   const tenancyId = useMemo(() => Number(tenancyIdStr), [tenancyIdStr]);
 
   const searchParams = useSearchParams();
-  // Read refMonth from query string (propagated from ClientTable)
   const refMonth = searchParams.get("refMonth") || "";
 
   const [form, setForm] = useState<IndexationFormState>({
@@ -114,6 +128,9 @@ export default function IndexationDetailPage({
     effectiveDate: firstDayOfNextMonthLocal(),
     referenceDate: firstDayOfNextMonthLocal(),
     comment: "",
+    splitRent: false,
+    indexableRent: null,
+    nonIndexableRent: null,
     indexNebenkosten: false,
     oldAncillary: null,
     newAncillary: null,
@@ -142,7 +159,6 @@ export default function IndexationDetailPage({
         setLoading(true);
         setLoadError(null);
 
-        // Build URL with refMonth if provided
         const qp = new URLSearchParams();
         if (refMonth) {
           qp.set("refMonth", refMonth);
@@ -182,6 +198,9 @@ export default function IndexationDetailPage({
           newRent,
           appliedPct,
           effectiveDate: firstDayOfNextMonthLocal(),
+          // Default: full rent is indexable
+          indexableRent: oldRent,
+          nonIndexableRent: 0,
           oldAncillary: row.current_ancillary_costs ?? null,
           oldHeating: row.current_heating_costs ?? null,
         }));
@@ -206,11 +225,7 @@ export default function IndexationDetailPage({
   const handlePctChange = (value: string) => {
     const pct = value === "" ? null : Number(value) / 100;
     setForm((prev) => {
-      const oldRent = prev.oldRent ?? null;
-      const newRent =
-        oldRent != null && pct != null
-          ? +(oldRent * (1 + pct)).toFixed(2)
-          : prev.newRent;
+      const newRent = computeNewRent(prev.indexableRent, prev.nonIndexableRent, pct);
       return { ...prev, appliedPct: pct, newRent };
     });
   };
@@ -218,12 +233,63 @@ export default function IndexationDetailPage({
   const handleNewRentChange = (value: string) => {
     const nr = value === "" ? null : Number(value);
     setForm((prev) => {
-      const oldRent = prev.oldRent ?? null;
+      // Editing total new rent → back-compute applied_pct on indexable portion
+      const indexable = prev.indexableRent ?? prev.oldRent ?? null;
+      const flat = prev.nonIndexableRent ?? 0;
       const pct =
-        oldRent != null && nr != null && oldRent > 0
-          ? +(nr / oldRent - 1)
+        indexable != null && indexable > 0 && nr != null
+          ? +((nr - flat) / indexable - 1)
           : prev.appliedPct;
       return { ...prev, newRent: nr, appliedPct: pct };
+    });
+  };
+
+  const handleToggleSplit = (checked: boolean) => {
+    setForm((prev) => {
+      if (!checked) {
+        // Restore: full rent is indexable, nothing non-indexable
+        const oldRent = prev.oldRent ?? null;
+        const newRent = computeNewRent(oldRent, 0, prev.appliedPct);
+        return {
+          ...prev,
+          splitRent: false,
+          indexableRent: oldRent,
+          nonIndexableRent: 0,
+          newRent,
+        };
+      }
+      // Enable split: initialize with full rent indexable / 0 non-indexable
+      return {
+        ...prev,
+        splitRent: true,
+        indexableRent: prev.oldRent ?? null,
+        nonIndexableRent: 0,
+      };
+    });
+  };
+
+  const handleIndexableRentChange = (value: string) => {
+    const indexable = value === "" ? null : Number(value);
+    setForm((prev) => {
+      // Auto-adjust non-indexable so old rent total is preserved
+      const flat =
+        indexable != null && prev.oldRent != null
+          ? +(prev.oldRent - indexable).toFixed(2)
+          : prev.nonIndexableRent;
+      const newRent = computeNewRent(indexable, flat, prev.appliedPct);
+      return { ...prev, indexableRent: indexable, nonIndexableRent: flat, newRent };
+    });
+  };
+
+  const handleNonIndexableRentChange = (value: string) => {
+    const flat = value === "" ? null : Number(value);
+    setForm((prev) => {
+      const indexable =
+        flat != null && prev.oldRent != null
+          ? +(prev.oldRent - flat).toFixed(2)
+          : prev.indexableRent;
+      const newRent = computeNewRent(indexable, flat, prev.appliedPct);
+      return { ...prev, indexableRent: indexable, nonIndexableRent: flat, newRent };
     });
   };
 
@@ -232,7 +298,6 @@ export default function IndexationDetailPage({
       if (!checked) {
         return { ...prev, indexNebenkosten: false, newAncillary: null, ancillaryAppliedPct: null };
       }
-      // Auto-calculate NK from same applied_pct as rent
       const oldAnc = prev.oldAncillary;
       const pct = prev.appliedPct;
       const newAnc =
@@ -319,11 +384,16 @@ export default function IndexationDetailPage({
       form.tenancyName ? `Tenancy: ${form.tenancyName}` : "",
       form.propertyLabel ? `Property: ${form.propertyLabel}` : "",
       form.tenant ? `Tenant: ${form.tenant}` : "",
-      `Old rent: ${form.oldRent ?? "\u2014"}`,
-      `New rent: ${form.newRent ?? "\u2014"}`,
-      `Increase: ${
+      `Old rent total: ${form.oldRent ?? "\u2014"}`,
+      form.splitRent
+        ? `  ↳ indexable: ${form.indexableRent ?? "?"} | non-indexable: ${
+            form.nonIndexableRent ?? "?"
+          }`
+        : "",
+      `New rent total: ${form.newRent ?? "\u2014"}`,
+      `Applied %: ${
         form.appliedPct != null ? (form.appliedPct * 100).toFixed(2) + "%" : "\u2014"
-      }`,
+      }${form.splitRent ? " (on indexable portion)" : ""}`,
       form.indexNebenkosten
         ? `NK indexed: ${form.oldAncillary ?? "?"} → ${form.newAncillary ?? "?"} (${
             form.ancillaryAppliedPct != null
@@ -386,6 +456,22 @@ export default function IndexationDetailPage({
       return;
     }
 
+    // Validate split if enabled
+    if (form.splitRent) {
+      const indexable = numOrNull(form.indexableRent);
+      const flat = numOrNull(form.nonIndexableRent);
+      if (indexable == null || flat == null || indexable < 0 || flat < 0) {
+        alert("Split rent: indexable and non-indexable amounts must be positive numbers.");
+        return;
+      }
+      if (Math.abs(indexable + flat - oldRent) > 0.01) {
+        alert(
+          `Split rent: indexable (${indexable}) + non-indexable (${flat}) must equal old rent total (${oldRent}).`
+        );
+        return;
+      }
+    }
+
     try {
       if (dryRun) {
         setPreviewing(true);
@@ -408,6 +494,10 @@ export default function IndexationDetailPage({
           ui_row: sourceRow,
           return_pdf: true,
           dry_run: dryRun,
+          // Split rent (rare case)
+          split_rent: form.splitRent,
+          indexable_rent: form.splitRent ? form.indexableRent : null,
+          non_indexable_rent: form.splitRent ? form.nonIndexableRent : null,
           // Nebenkosten indexation
           index_nebenkosten: form.indexNebenkosten,
           new_ancillary: form.indexNebenkosten ? form.newAncillary : null,
@@ -511,7 +601,6 @@ export default function IndexationDetailPage({
 
   return (
     <main className="min-h-screen w-full bg-[#f5f6f8]">
-      {/* Top bar */}
       <div className="sticky top-0 z-10 bg-white/80 backdrop-blur border-b border-gray-200">
         <div className="max-w-3xl mx-auto px-6 py-3 flex items-center justify-between">
           <div className="flex items-center gap-3 min-w-0">
@@ -544,7 +633,6 @@ export default function IndexationDetailPage({
       </div>
 
       <div className="max-w-3xl mx-auto px-6 py-8 space-y-6">
-        {/* Context banner */}
         {(form.propertyLabel || form.tenancyName) && (
           <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs text-gray-500">
             {form.propertyLabel && (
@@ -564,32 +652,55 @@ export default function IndexationDetailPage({
 
         {/* ── Rent section ── */}
         <section className="rounded-xl bg-white border border-gray-200 shadow-sm overflow-hidden">
-          <div className="px-5 py-3 border-b border-gray-100 bg-gray-50/60">
+          <div className="px-5 py-3 border-b border-gray-100 bg-gray-50/60 flex items-center justify-between">
             <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Rent indexation</h2>
+            <label className="flex items-center gap-2 cursor-pointer select-none" title="Use when only part of the rent should be indexed (multi-surface tenant)">
+              <span className="text-[11px] text-gray-500">Split rent</span>
+              <div className="relative">
+                <input
+                  type="checkbox"
+                  checked={form.splitRent}
+                  onChange={(e) => handleToggleSplit(e.target.checked)}
+                  className="sr-only peer"
+                />
+                <div className="w-8 h-[18px] bg-gray-200 rounded-full peer-checked:bg-amber-500 transition-colors" />
+                <div className="absolute left-0.5 top-0.5 w-[14px] h-[14px] bg-white rounded-full shadow-sm peer-checked:translate-x-[14px] transition-transform" />
+              </div>
+            </label>
           </div>
           <div className="p-5 grid grid-cols-2 gap-x-5 gap-y-4 text-sm">
-            {/* Old rent */}
+            {/* Old rent total */}
             <div>
               <label className="block text-[11px] font-medium text-gray-400 uppercase tracking-wide mb-1.5">
-                Old rent (net)
+                Old rent total (net)
               </label>
               <input
                 type="number"
                 className="w-full rounded-lg border border-gray-200 bg-gray-50/50 px-3 py-2 text-sm text-gray-900 outline-none focus:border-gray-400 focus:ring-1 focus:ring-gray-200 transition"
                 value={form.oldRent ?? ""}
-                onChange={(e) =>
-                  handleChange(
-                    "oldRent",
-                    e.target.value === "" ? null : Number(e.target.value)
-                  )
-                }
+                onChange={(e) => {
+                  const v = e.target.value === "" ? null : Number(e.target.value);
+                  setForm((prev) => {
+                    // Adjust indexable too if split is not active
+                    if (!prev.splitRent) {
+                      return {
+                        ...prev,
+                        oldRent: v,
+                        indexableRent: v,
+                        nonIndexableRent: 0,
+                        newRent: computeNewRent(v, 0, prev.appliedPct),
+                      };
+                    }
+                    return { ...prev, oldRent: v };
+                  });
+                }}
               />
             </div>
 
-            {/* New rent */}
+            {/* New rent total */}
             <div>
               <label className="block text-[11px] font-medium text-gray-400 uppercase tracking-wide mb-1.5">
-                New rent (net)
+                New rent total (net)
               </label>
               <input
                 type="number"
@@ -599,10 +710,38 @@ export default function IndexationDetailPage({
               />
             </div>
 
+            {/* Split fields — only when enabled */}
+            {form.splitRent && (
+              <>
+                <div>
+                  <label className="block text-[11px] font-medium text-amber-600 uppercase tracking-wide mb-1.5">
+                    Indexable portion
+                  </label>
+                  <input
+                    type="number"
+                    className="w-full rounded-lg border border-amber-300 bg-amber-50/30 px-3 py-2 text-sm text-gray-900 outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-200 transition"
+                    value={form.indexableRent ?? ""}
+                    onChange={(e) => handleIndexableRentChange(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-medium text-amber-600 uppercase tracking-wide mb-1.5">
+                    Non-indexable portion
+                  </label>
+                  <input
+                    type="number"
+                    className="w-full rounded-lg border border-amber-300 bg-amber-50/30 px-3 py-2 text-sm text-gray-900 outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-200 transition"
+                    value={form.nonIndexableRent ?? ""}
+                    onChange={(e) => handleNonIndexableRentChange(e.target.value)}
+                  />
+                </div>
+              </>
+            )}
+
             {/* % applied */}
             <div>
               <label className="block text-[11px] font-medium text-gray-400 uppercase tracking-wide mb-1.5">
-                % applied
+                % applied {form.splitRent && <span className="text-amber-600 normal-case">(on indexable)</span>}
               </label>
               <div className="relative">
                 <input
@@ -847,7 +986,6 @@ export default function IndexationDetailPage({
             </pre>
           </div>
 
-          {/* Action buttons */}
           <div className="px-5 py-4 border-t border-gray-100 bg-gray-50/40 flex items-center gap-3 justify-end">
             <button
               type="button"
