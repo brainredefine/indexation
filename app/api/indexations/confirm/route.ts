@@ -13,21 +13,25 @@ type Body = {
   tenancy_id?: number;
   old_rent?: number;
   new_rent?: number;
-  applied_pct?: number | null;   // décimal
-  effective_date?: string;       // "YYYY-MM-DD"
-  reference_date?: string;       // "YYYY-MM-DD" — written to Odoo adjustment_date (defaults to effective_date)
+  applied_pct?: number | null;   // décimal — appliqué sur la portion indexable
+  effective_date?: string;
+  reference_date?: string;
   comment?: string | null;
   ui_row?: UiRow;
   return_pdf?: boolean;
-  dry_run?: boolean;             // preview mode: no DB insert, no Odoo write, IND = "PREVIEW"
+  dry_run?: boolean;
+  // Split rent (rare case: multi-surface tenant, only part is indexable)
+  split_rent?: boolean;
+  indexable_rent?: number | null;     // portion indexée
+  non_indexable_rent?: number | null; // portion non indexée
   // Nebenkosten indexation
   index_nebenkosten?: boolean;
   new_ancillary?: number | null;
-  ancillary_applied_pct?: number | null; // decimal
+  ancillary_applied_pct?: number | null;
   // Heizkosten indexation
   index_heating?: boolean;
   new_heating?: number | null;
-  heating_applied_pct?: number | null; // decimal
+  heating_applied_pct?: number | null;
 };
 function getDataSupabase() {
   const url = process.env.SUPABASE_URL_DATA!;
@@ -67,17 +71,15 @@ function addMonthsToFirstOfMonth(dateStr: string, months: number): string | null
 /**
  * Sanitize a value that should be an ISO date string or null.
  * Odoo returns `false` for empty date fields, which would break Postgres date columns.
- * Returns null for anything that isn't a valid non-empty string.
  */
 function safeDate(v: unknown): string | null {
   if (v == null) return null;
-  if (typeof v !== "string") return null;          // catches Odoo `false`, booleans, numbers
+  if (typeof v !== "string") return null;
   const trimmed = v.trim();
   if (trimmed === "" || trimmed.toLowerCase() === "false") return null;
   return trimmed;
 }
 
-/** "AC01 - 09 - Deichmann" -> "9" */
 function extractTenantNo(name?: string | null): string | null {
   if (!name) return null;
   const parts = name.split(" - ");
@@ -88,22 +90,10 @@ function extractTenantNo(name?: string | null): string | null {
   return String(num);
 }
 
-/**
- * Detect VAT rate (19% gross) from rent_product_id name.
- *
- * The product taxes_id field in Odoo is unreliable in multi-company setups
- * (the same product can have multiple taxes attached, one per company).
- * The product NAME is the source of truth: "Miete Gewerblich 0%" → 0%,
- * "Miete Gewerblich 19%" → 19%.
- *
- * Returns true if the product is gross 19%, false otherwise.
- */
 function detectIsGross19FromProductName(name?: string | null): boolean {
   if (!name) return false;
   const n = name.toLowerCase().replace(/\s+/g, "");
-  // Explicit 0% wins
   if (n.includes("0%")) return false;
-  // 19% match
   if (n.includes("19%")) return true;
   return false;
 }
@@ -116,10 +106,21 @@ export async function POST(req: NextRequest) {
     const new_rent = Number(body.new_rent);
     const applied_pct = body.applied_pct ?? null;
     const effective_date = body.effective_date;
-    const reference_date = body.reference_date || body.effective_date; // fallback
+    const reference_date = body.reference_date || body.effective_date;
     const comment = body.comment ?? null;
     const ui_row = (body.ui_row ?? null) as UiRow;
     const dryRun = Boolean(body.dry_run);
+
+    // Split rent
+    const splitRent = Boolean(body.split_rent);
+    const indexableRent =
+      splitRent && body.indexable_rent != null && Number.isFinite(body.indexable_rent)
+        ? Number(body.indexable_rent)
+        : null;
+    const nonIndexableRent =
+      splitRent && body.non_indexable_rent != null && Number.isFinite(body.non_indexable_rent)
+        ? Number(body.non_indexable_rent)
+        : null;
 
     // Nebenkosten indexation params
     const indexNebenkosten = Boolean(body.index_nebenkosten);
@@ -144,14 +145,34 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: false, error: "effective_date manquante" }, { status: 400 });
     }
 
+    // Validate split coherence
+    if (splitRent) {
+      if (indexableRent == null || nonIndexableRent == null) {
+        return NextResponse.json(
+          { ok: false, error: "split_rent enabled but indexable_rent / non_indexable_rent missing" },
+          { status: 400 }
+        );
+      }
+      if (Math.abs(indexableRent + nonIndexableRent - old_rent) > 0.01) {
+        return NextResponse.json(
+          {
+            ok: false,
+            error: `split sum mismatch: ${indexableRent} + ${nonIndexableRent} ≠ ${old_rent}`,
+          },
+          { status: 400 }
+        );
+      }
+    }
+
     const odoo = new OdooClient();
 
     const effDateObj = new Date(effective_date);
     const year = Number.isFinite(effDateObj.getTime())
       ? effDateObj.getUTCFullYear()
       : new Date().getUTCFullYear();
+
     // ------------------------------------------------------------------
-    // 1) Lire property.tenancy (pour property, partner, vat rent, ancillary, heating)
+    // 1) property.tenancy
     // ------------------------------------------------------------------
     const tenancies = await odoo.executeKw<
       Array<{
@@ -180,15 +201,14 @@ export async function POST(req: NextRequest) {
     if (!tenancyRec) {
       return NextResponse.json({ ok: false, error: "Tenancy introuvable dans Odoo" }, { status: 404 });
     }
-    const tenancyNameForTenantNo: string | null =
-      tenancyRec.name ??
-      (typeof ui_row?.name === "string" ? ui_row.name : null);
+
     let propertyId: number | null = null;
     if (tenancyRec.main_property_id && Array.isArray(tenancyRec.main_property_id)) {
       propertyId = tenancyRec.main_property_id[0];
     }
+
     // ------------------------------------------------------------------
-    // 2) Lire property.property (fund, entity, slate_id, address asset)
+    // 2) property.property
     // ------------------------------------------------------------------
     let fund: string | null = null;
     let companyIdForInd: string | null = null;
@@ -247,8 +267,9 @@ export async function POST(req: NextRequest) {
         if (parts) propertyAddress = parts;
       }
     }
+
     // ------------------------------------------------------------------
-    // 3) Bridge locataire: partner_id -> res.partner -> commercial_partner
+    // 3) Tenant
     // ------------------------------------------------------------------
     let tenantName: string | null = null;
     let tenantAddress: string | null = null;
@@ -304,23 +325,21 @@ export async function POST(req: NextRequest) {
         }
       }
     }
+
     // ------------------------------------------------------------------
-    // 4) Label pour PDF
+    // 4) Label PDF
     // ------------------------------------------------------------------
     let propertyLabelForPdf: string | null = null;
     if (tenancyRec.main_property_id && Array.isArray(tenancyRec.main_property_id)) {
       propertyLabelForPdf = String(tenancyRec.main_property_id[1] ?? tenancyRec.main_property_id[0]);
     }
+
     // ------------------------------------------------------------------
-    // 5) TVA Loyer
-    //    Détection basée sur le NOM du rent_product_id (source de vérité).
-    //    Le champ taxes_id du produit n'est pas fiable en multi-company
-    //    (plusieurs taxes 19% peuvent être attachées, une par société).
+    // 5) TVA Loyer (via product name)
     // ------------------------------------------------------------------
     let isGross19 = false;
     let rentProductName: string | null = null;
     if (tenancyRec.rent_product_id && Array.isArray(tenancyRec.rent_product_id)) {
-      // The name comes directly from the m2o tuple [id, name]
       rentProductName = String(tenancyRec.rent_product_id[1] ?? "");
       isGross19 = detectIsGross19FromProductName(rentProductName);
     }
@@ -343,15 +362,11 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // ------------------------------------------------------------------
-    // 6b) Nebenkosten indexation: resolve final new ancillary
-    // ------------------------------------------------------------------
+    // 6b) Nebenkosten new
     let ancillaryNew: number | null = null;
     let ancillaryAppliedPct: number | null = null;
-
     if (indexNebenkosten && ancillary_current != null) {
       if (bodyNewAncillary != null && Number.isFinite(bodyNewAncillary)) {
-        // Client provided an explicit new NK amount
         ancillaryNew = bodyNewAncillary;
         ancillaryAppliedPct =
           bodyAncillaryPct != null
@@ -360,23 +375,18 @@ export async function POST(req: NextRequest) {
               ? ancillaryNew / ancillary_current - 1
               : null;
       } else if (applied_pct != null) {
-        // Fallback: apply same percentage as rent
         ancillaryNew = +(ancillary_current * (1 + applied_pct)).toFixed(2);
         ancillaryAppliedPct = applied_pct;
       }
     }
 
-    // ------------------------------------------------------------------
-    // 6c) Heating costs (Heizkosten)
-    // ------------------------------------------------------------------
+    // 6c) Heizkosten new
     const heating_current =
       typeof tenancyRec.current_heating_costs === "number"
         ? tenancyRec.current_heating_costs
         : null;
-
     let heatingNew: number | null = null;
     let heatingAppliedPct: number | null = null;
-
     if (indexHeating && heating_current != null) {
       if (bodyNewHeating != null && Number.isFinite(bodyNewHeating)) {
         heatingNew = bodyNewHeating;
@@ -393,7 +403,7 @@ export async function POST(req: NextRequest) {
     }
 
     // ------------------------------------------------------------------
-    // 7) Génération UUID de la tenancy
+    // 7) Dates dérivées
     // ------------------------------------------------------------------
     const tenancy_uuid = `${tenancy_id}`;
     const tenancyType = "residential";
@@ -418,13 +428,17 @@ export async function POST(req: NextRequest) {
     const end_of_contract = safeDate(ui_row?.date_end_display);
 
     // ------------------------------------------------------------------
-    // 8) Insert DATA Supabase (skip in dry_run)
+    // 8) Insert Supabase
     // ------------------------------------------------------------------
     let ind: string | null = null;
     let insertedId: number | null = null;
 
     if (!dryRun) {
       const dataSupabase = getDataSupabase();
+
+      const splitComment = splitRent
+        ? `[SPLIT RENT] Indexable portion: ${indexableRent}, non-indexable: ${nonIndexableRent}. ${comment ?? ""}`.trim()
+        : comment;
 
       const payload = {
         tenancy_uuid,
@@ -451,7 +465,7 @@ export async function POST(req: NextRequest) {
         adjustment_period: ui_row?.adjustment_period ?? null,
         next_possible_indexation_date,
         end_of_contract,
-        indexation_comment: comment,
+        indexation_comment: splitComment,
         effective_date: safeDate(effective_date),
         reference_date: safeDate(reference_date) ?? safeDate(effective_date),
         company_id: companyIdForInd,
@@ -471,18 +485,18 @@ export async function POST(req: NextRequest) {
       ind = (inserted as any).ind as string | null;
       insertedId = (inserted as any).id as number | null;
     } else {
-      // dry_run: use a placeholder IND
       ind = "PREVIEW";
     }
 
     // ------------------------------------------------------------------
-    // 9) Nom fichier PDF
+    // 9) Filename
     // ------------------------------------------------------------------
     const fileName = dryRun
       ? `preview_${tenancy_id}.pdf`
       : `${ind ?? tenancy_id}.pdf`;
+
     // ------------------------------------------------------------------
-    // 10) Données index pour le PDF
+    // 10) Index PDF data
     // ------------------------------------------------------------------
     const index_prev_value =
       typeof ui_row?.adjustment_index === "number" ? ui_row.adjustment_index : null;
@@ -498,8 +512,9 @@ export async function POST(req: NextRequest) {
       null;
     const index_delta =
       typeof ui_row?.delta === "number" ? ui_row.delta : null;
+
     // ------------------------------------------------------------------
-    // 11) Générer PDF + upload (skip upload in dry_run)
+    // 11) PDF
     // ------------------------------------------------------------------
     const pdfParams: IndexationPdfParams = {
       ind: dryRun ? null : ind,
@@ -519,7 +534,11 @@ export async function POST(req: NextRequest) {
       is_gross_19: isGross19,
       ancillary_current,
       ancillary_vat_rate,
-      // Nebenkosten indexation
+      // Split rent
+      split_rent: splitRent,
+      indexable_rent: indexableRent,
+      non_indexable_rent: nonIndexableRent,
+      // Nebenkosten
       index_nebenkosten: indexNebenkosten,
       ancillary_new: ancillaryNew,
       ancillary_applied_pct: ancillaryAppliedPct,
@@ -541,7 +560,6 @@ export async function POST(req: NextRequest) {
 
     if (!dryRun) {
       const storageSupabase = getStorageSupabase();
-
       try {
         const { error: uploadErr } = await storageSupabase.storage
           .from("inbox")
@@ -562,7 +580,8 @@ export async function POST(req: NextRequest) {
     }
 
     // ------------------------------------------------------------------
-    // 12) Odoo : update rent + ancillary + heating + adjustment_date (skip in dry_run)
+    // 12) Odoo write : on écrit le NEW RENT TOTAL (qui inclut déjà la partie
+    //     non indexée). Pas de logique split en Odoo.
     // ------------------------------------------------------------------
     let odooUpdateStatus = {
       rent_record_id: null as number | null,
@@ -585,7 +604,6 @@ export async function POST(req: NextRequest) {
           const rentId = rentIds[0];
           odooUpdateStatus.rent_record_id = rentId;
 
-          // Build the write payload: always rent + date_start, conditionally NK + heating
           const rentWritePayload: Record<string, any> = {
             rent: new_rent,
             date_start: effective_date,
@@ -604,7 +622,6 @@ export async function POST(req: NextRequest) {
             [[rentId], rentWritePayload]
           );
 
-          // Track which fields were actually included in the write
           if ("ancillary_costs" in rentWritePayload) {
             odooUpdateStatus.wrote_ancillary = odooUpdateStatus.wrote_rent;
           }
@@ -626,7 +643,7 @@ export async function POST(req: NextRequest) {
     }
 
     // ------------------------------------------------------------------
-    // 13) Retour final
+    // 13) Retour
     // ------------------------------------------------------------------
     return NextResponse.json({
       ok: true,
@@ -638,6 +655,9 @@ export async function POST(req: NextRequest) {
       pdf_file_name: fileName,
       pdf_base64,
       vat_info: { rent_product_name: rentProductName, is_gross_19: isGross19 },
+      split_info: splitRent
+        ? { indexable_rent: indexableRent, non_indexable_rent: nonIndexableRent }
+        : null,
       ...(dryRun
         ? {}
         : {
