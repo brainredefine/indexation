@@ -9,11 +9,11 @@ export type IndexationPdfParams = {
   tenancy_id: number;
   tenant: string | null;
   property_label: string | null;
-  address: string | null; // multiligne avec \n
+  address: string | null;
 
-  old_rent: number;
-  new_rent: number;
-  applied_pct: number | null;
+  old_rent: number;       // total ancien loyer
+  new_rent: number;       // total nouveau loyer (inclut partie non indexée)
+  applied_pct: number | null; // % appliqué (sur la portion indexable si split)
   effective_date: string;
 
   index_prev_value: number | null;
@@ -24,19 +24,24 @@ export type IndexationPdfParams = {
 
   is_gross_19: boolean;
 
-  ancillary_current: number | null; // netto
+  ancillary_current: number | null;
   ancillary_vat_rate: 19 | 0 | null;
 
-  // Nebenkosten indexation (optional)
-  index_nebenkosten: boolean;
-  ancillary_new: number | null;        // new NK netto after indexation
-  ancillary_applied_pct: number | null; // decimal, e.g. 0.034
+  // Split rent (rare case)
+  split_rent: boolean;
+  indexable_rent: number | null;     // portion indexée
+  non_indexable_rent: number | null; // portion non indexée
 
-  // Heizkosten (optional)
-  heating_current: number | null;       // netto
+  // Nebenkosten indexation
+  index_nebenkosten: boolean;
+  ancillary_new: number | null;
+  ancillary_applied_pct: number | null;
+
+  // Heizkosten
+  heating_current: number | null;
   index_heating: boolean;
-  heating_new: number | null;           // new heating netto after indexation
-  heating_applied_pct: number | null;   // decimal
+  heating_new: number | null;
+  heating_applied_pct: number | null;
 };
 
 function formatDateGerman(d: string): string {
@@ -89,6 +94,9 @@ export async function generateIndexationPdf(
     is_gross_19,
     ancillary_current,
     ancillary_vat_rate,
+    split_rent,
+    indexable_rent,
+    non_indexable_rent,
     index_nebenkosten,
     ancillary_new,
     ancillary_applied_pct,
@@ -105,11 +113,9 @@ export async function generateIndexationPdf(
   let secondTemplatePage: PDFPage | null = null;
   let secondTemplateUsed = false;
 
-  // Taille par défaut A4
   let width = 595.28;
   let height = 841.89;
 
-  // -------- 1) Charger le modèle PDF (Word exporté) --------
   try {
     const templatePath = path.join(
       process.cwd(),
@@ -119,17 +125,13 @@ export async function generateIndexationPdf(
     const templateBytes = fs.readFileSync(templatePath);
     const templateDoc = await PDFDocument.load(templateBytes);
 
-    // Page 1 du template → page 1 du PDF
     const [templatePage1] = await pdfDoc.copyPages(templateDoc, [0]);
     page = pdfDoc.addPage(templatePage1);
 
-    // Page 2 du template = même base, mais on masque la box "Es schreibt Ihnen"
     const [templatePage2] = await pdfDoc.copyPages(templateDoc, [0]);
 
-    // Rectangle blanc qui recouvre la zone de la box "Es schreibt Ihnen"
-    // (coordonnées approximatives, à ajuster si besoin)
-    const boxX = width - 230; // proche du bord droit
-    const boxY = height - 260; // zone haute
+    const boxX = width - 230;
+    const boxY = height - 260;
     const boxWidthRect = 210;
     const boxHeightRect = 140;
 
@@ -147,23 +149,11 @@ export async function generateIndexationPdf(
     width = size.width;
     height = size.height;
   } catch {
-    // fallback si le template n'est pas dispo
     page = pdfDoc.addPage([width, height]);
   }
 
-  // -------- 2) Polices Titillium Web --------
-  const regularPath = path.join(
-    process.cwd(),
-    "lib",
-    "fonts",
-    "TitilliumWeb-Regular.ttf"
-  );
-  const boldPath = path.join(
-    process.cwd(),
-    "lib",
-    "fonts",
-    "TitilliumWeb-Bold.ttf"
-  );
+  const regularPath = path.join(process.cwd(), "lib", "fonts", "TitilliumWeb-Regular.ttf");
+  const boldPath = path.join(process.cwd(), "lib", "fonts", "TitilliumWeb-Bold.ttf");
 
   const fontRegularBytes = fs.readFileSync(regularPath);
   const fontBoldBytes = fs.readFileSync(boldPath);
@@ -176,9 +166,6 @@ export async function generateIndexationPdf(
 
   const dateStr = formatDateGerman(effective_date);
 
-  // Top de la zone de texte :
-  //  - page 1 : un peu plus haut
-  //  - page 2+ : légèrement plus bas pour laisser de la marge sous le header
   const contentTopYFirst = height - 134 - 50;
   const contentTopYOther = contentTopYFirst;
 
@@ -188,12 +175,10 @@ export async function generateIndexationPdf(
 
   function newPage() {
     if (secondTemplatePage && !secondTemplateUsed) {
-      // 2e page : template avec box masquée
       page = pdfDoc.addPage(secondTemplatePage);
       secondTemplateUsed = true;
       y = contentTopYOther;
     } else {
-      // 3e page+ : page A4 blanche
       page = pdfDoc.addPage([width, height]);
       y = contentTopYOther;
     }
@@ -205,7 +190,6 @@ export async function generateIndexationPdf(
     }
   }
 
-  // Helper pour paragraphe justifié
   function drawJustifiedParagraph(text: string, fontSize: number) {
     const words = text.split(/\s+/).filter(Boolean);
     if (words.length === 0) return;
@@ -222,32 +206,19 @@ export async function generateIndexationPdf(
 
       if (isLast || lineWords.length === 1) {
         const lineText = lineWords.join(" ");
-        page.drawText(lineText, {
-          x: leftMargin,
-          y: yLine,
-          size: fontSize,
-          font,
-        });
+        page.drawText(lineText, { x: leftMargin, y: yLine, size: fontSize, font });
       } else {
-        const wordsWidths = lineWords.map((w) =>
-          font.widthOfTextAtSize(w, fontSize)
-        );
+        const wordsWidths = lineWords.map((w) => font.widthOfTextAtSize(w, fontSize));
         const textWidth = wordsWidths.reduce((a, b) => a + b, 0);
         const baseSpacesWidth = spaceWidth * (lineWords.length - 1);
         const missing = maxWidth - (textWidth + baseSpacesWidth);
-        const extraPerSpace =
-          lineWords.length > 1 ? missing / (lineWords.length - 1) : 0;
+        const extraPerSpace = lineWords.length > 1 ? missing / (lineWords.length - 1) : 0;
 
         let xx = leftMargin;
         for (let i = 0; i < lineWords.length; i++) {
           const word = lineWords[i];
           const wWidth = wordsWidths[i];
-          page.drawText(word, {
-            x: xx,
-            y: yLine,
-            size: fontSize,
-            font,
-          });
+          page.drawText(word, { x: xx, y: yLine, size: fontSize, font });
           xx += wWidth;
           if (i < lineWords.length - 1) {
             xx += spaceWidth + extraPerSpace;
@@ -277,7 +248,7 @@ export async function generateIndexationPdf(
   }
 
   // ---------------------------------------------------------------------------
-  // Adresse locataire – police 10, un peu plus bas
+  // Tenant address
   // ---------------------------------------------------------------------------
   const addrLines: string[] = [];
   if (tenant) addrLines.push(tenant);
@@ -295,28 +266,20 @@ export async function generateIndexationPdf(
   y -= 40;
 
   // ---------------------------------------------------------------------------
-  // Berlin + date – À GAUCHE MAINTENANT - DATE DU JOUR (pas effective_date)
+  // Berlin + date
   // ---------------------------------------------------------------------------
   ensureSpace(120);
 
-  // ✅ Date du jour pour la lettre
   const today = new Date();
   const todayStr = formatDateGerman(today.toISOString().slice(0, 10));
   const dateText = `Berlin, ${todayStr}`;
-
-  // ✅ CHANGEMENT ICI : on met le texte à gauche
   const dateX = leftMargin;
 
-  page.drawText(dateText, {
-    x: dateX,
-    y,
-    size: 9,
-    font,
-  });
+  page.drawText(dateText, { x: dateX, y, size: 9, font });
   y -= 15;
 
   // ---------------------------------------------------------------------------
-  // Sujet – une seule ligne Hier + Gültig ab ...
+  // Subject
   // ---------------------------------------------------------------------------
   const subjLines: string[] = [
     "Hier: Mietanpassung gem. Indexierung Ihres Mietvertrages",
@@ -335,45 +298,44 @@ export async function generateIndexationPdf(
   y -= 20;
 
   // ---------------------------------------------------------------------------
-  // Corps – salutation + paragraphe justifié
+  // Body intro
   // ---------------------------------------------------------------------------
   ensureSpace(120);
-  page.drawText("Sehr geehrte Damen und Herren,", {
-    x: leftMargin,
-    y,
-    size: 10,
-    font,
-  });
+  page.drawText("Sehr geehrte Damen und Herren,", { x: leftMargin, y, size: 10, font });
   y -= 18;
 
-  const indexingNkAndHeating =
-    (index_nebenkosten && ancillary_new != null) &&
-    (index_heating && heating_new != null);
-  const indexingNkOnly =
-    index_nebenkosten && ancillary_new != null && !(index_heating && heating_new != null);
-  const indexingHeatingOnly =
-    index_heating && heating_new != null && !(index_nebenkosten && ancillary_new != null);
+  const indexingNk = index_nebenkosten && ancillary_new != null;
+  const indexingHeat = index_heating && heating_new != null;
 
   let extraSentence = "";
-  if (indexingNkAndHeating) {
-    extraSentence = " Die Nebenkosten und Heizkosten werden ebenfalls gemäß den vertraglichen Regelungen entsprechend angepasst.";
-  } else if (indexingNkOnly) {
+  if (indexingNk && indexingHeat) {
+    extraSentence =
+      " Die Nebenkosten und Heizkosten werden ebenfalls gemäß den vertraglichen Regelungen entsprechend angepasst.";
+  } else if (indexingNk) {
     extraSentence = " Die Nebenkosten werden ebenfalls gemäß den vertraglichen Regelungen entsprechend angepasst.";
-  } else if (indexingHeatingOnly) {
+  } else if (indexingHeat) {
     extraSentence = " Die Heizkosten werden ebenfalls gemäß den vertraglichen Regelungen entsprechend angepasst.";
   }
+
+  const splitNote =
+    split_rent && indexable_rent != null && non_indexable_rent != null
+      ? ` Die Indexierung erfolgt vertragsgemäß ausschließlich auf einen Teilbetrag der Gesamtmiete in Höhe von ${formatCurrencyDE(
+          indexable_rent
+        )}.`
+      : "";
 
   const introParagraph =
     "gemäß den Regelungen Ihres Mietvertrages wird die Miete an die Entwicklung des Verbraucherpreisindexes (VPI) angepasst. " +
     "Grundlage der Anpassung ist die Veränderung des Indexstandes gegenüber dem zuletzt berücksichtigten Index. " +
     "Auf Basis der nachstehenden Berechnung ergibt sich eine Anpassung Ihrer Miete." +
+    splitNote +
     extraSentence;
 
   drawJustifiedParagraph(introParagraph, 10);
   y -= 10;
 
   // ---------------------------------------------------------------------------
-  // Bloc index – titre, tableau, explication justifiée
+  // Index block (VPI)
   // ---------------------------------------------------------------------------
   const hasIndexBlock = index_prev_value != null && index_cur_value != null;
 
@@ -385,16 +347,9 @@ export async function generateIndexationPdf(
 
     const idxDelta =
       index_delta ??
-      (index_prev_value && index_cur_value
-        ? index_cur_value / index_prev_value - 1
-        : null);
+      (index_prev_value && index_cur_value ? index_cur_value / index_prev_value - 1 : null);
 
-    page.drawText("Indexentwicklung (VPI):", {
-      x: leftMargin,
-      y,
-      size: 10,
-      font: fontBold,
-    });
+    page.drawText("Indexentwicklung (VPI):", { x: leftMargin, y, size: 10, font: fontBold });
     y -= 18;
 
     const labelWidth = 260;
@@ -402,17 +357,11 @@ export async function generateIndexationPdf(
     const idxLines: Array<[string, string]> = [
       [
         `Indexstand bisher (${idxPrevLabel})`,
-        index_prev_value!.toLocaleString("de-DE", {
-          minimumFractionDigits: 1,
-          maximumFractionDigits: 1,
-        }),
+        index_prev_value!.toLocaleString("de-DE", { minimumFractionDigits: 1, maximumFractionDigits: 1 }),
       ],
       [
         `Indexstand neu (${idxCurLabel})`,
-        index_cur_value!.toLocaleString("de-DE", {
-          minimumFractionDigits: 1,
-          maximumFractionDigits: 1,
-        }),
+        index_cur_value!.toLocaleString("de-DE", { minimumFractionDigits: 1, maximumFractionDigits: 1 }),
       ],
     ];
 
@@ -423,12 +372,7 @@ export async function generateIndexationPdf(
     for (const [label, value] of idxLines) {
       ensureSpace(140);
       page.drawText(label, { x: leftMargin, y, size: 10, font });
-      page.drawText(value, {
-        x: leftMargin + labelWidth,
-        y,
-        size: 10,
-        font,
-      });
+      page.drawText(value, { x: leftMargin + labelWidth, y, size: 10, font });
       y -= 16;
     }
 
@@ -439,18 +383,9 @@ export async function generateIndexationPdf(
       const appliedPctValue = applied_pct * 100;
       const passThroughPct = (applied_pct / idxDelta) * 100;
 
-      const totalStr = totalPct.toLocaleString("de-DE", {
-        minimumFractionDigits: 1,
-        maximumFractionDigits: 1,
-      });
-      const appliedStr = appliedPctValue.toLocaleString("de-DE", {
-        minimumFractionDigits: 1,
-        maximumFractionDigits: 1,
-      });
-      const passThroughStr = passThroughPct.toLocaleString("de-DE", {
-        minimumFractionDigits: 1,
-        maximumFractionDigits: 1,
-      });
+      const totalStr = totalPct.toLocaleString("de-DE", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+      const appliedStr = appliedPctValue.toLocaleString("de-DE", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+      const passThroughStr = passThroughPct.toLocaleString("de-DE", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 
       const explanation =
         `Die Veränderung des Index beträgt ${totalStr} %. ` +
@@ -463,20 +398,17 @@ export async function generateIndexationPdf(
   }
 
   // ---------------------------------------------------------------------------
-  // Bloc loyer – police 10
+  // Rent block
   // ---------------------------------------------------------------------------
-  const rentDeltaAbs = new_rent - old_rent;
   const pctStr = formatPercentDE1(applied_pct);
   const oldStr = formatCurrencyDE(old_rent);
-  const deltaStr = formatCurrencyDE(rentDeltaAbs);
   const newStr = formatCurrencyDE(new_rent);
 
   const newRentBrutto = is_gross_19 ? new_rent * 1.19 : null;
-  const newBruttoStr =
-    newRentBrutto != null ? formatCurrencyDE(newRentBrutto) : null;
+  const newBruttoStr = newRentBrutto != null ? formatCurrencyDE(newRentBrutto) : null;
 
   y -= 10;
-  ensureSpace(180);
+  ensureSpace(220);
 
   page.drawText(
     `Die Miete für Ihre Mietfläche setzt sich ab dem ${dateStr} wie folgt zusammen:`,
@@ -486,11 +418,54 @@ export async function generateIndexationPdf(
 
   const labelWidthRent = 260;
 
-  const rentLines: Line[] = [
-    { label: "derzeitige Miete netto", value: oldStr, bold: true },
-    { label: `zzgl. Indexanpassung ${pctStr}`, value: deltaStr, bold: false },
-    { label: "neue Miete netto", value: newStr, bold: true },
-  ];
+  const rentLines: Line[] = [];
+
+  if (split_rent && indexable_rent != null && non_indexable_rent != null) {
+    // Split-rent layout (Option A)
+    const indexedDeltaAbs = +(indexable_rent * (applied_pct ?? 0)).toFixed(2);
+    const indexedNewAbs = +(indexable_rent + indexedDeltaAbs).toFixed(2);
+
+    rentLines.push({ label: "derzeitige Miete netto (gesamt)", value: oldStr, bold: true });
+    rentLines.push({
+      label: "  davon indexierbar",
+      value: formatCurrencyDE(indexable_rent),
+      bold: false,
+    });
+    rentLines.push({
+      label: "  davon nicht indexierbar",
+      value: formatCurrencyDE(non_indexable_rent),
+      bold: false,
+    });
+    rentLines.push({
+      label: `zzgl. Indexanpassung ${pctStr} (auf indexierbaren Teil)`,
+      value: formatCurrencyDE(indexedDeltaAbs),
+      bold: false,
+    });
+    rentLines.push({
+      label: "indexierbarer Teil neu",
+      value: formatCurrencyDE(indexedNewAbs),
+      bold: false,
+    });
+    rentLines.push({
+      label: "nicht indexierbarer Teil (unverändert)",
+      value: formatCurrencyDE(non_indexable_rent),
+      bold: false,
+    });
+    rentLines.push({
+      label: "neue Miete netto (gesamt)",
+      value: newStr,
+      bold: true,
+      lineAbove: true,
+    });
+  } else {
+    // Standard layout
+    const rentDeltaAbs = new_rent - old_rent;
+    const deltaStr = formatCurrencyDE(rentDeltaAbs);
+
+    rentLines.push({ label: "derzeitige Miete netto", value: oldStr, bold: true });
+    rentLines.push({ label: `zzgl. Indexanpassung ${pctStr}`, value: deltaStr, bold: false });
+    rentLines.push({ label: "neue Miete netto", value: newStr, bold: true });
+  }
 
   if (newBruttoStr) {
     rentLines.push({ label: "MwSt", value: "19,0 %", bold: false });
@@ -525,19 +500,17 @@ export async function generateIndexationPdf(
   }
 
   // ---------------------------------------------------------------------------
-  // Bloc Nebenkosten – police 10
+  // Nebenkosten block
   // ---------------------------------------------------------------------------
   let ancNet: number | null = null;
   let ancGross: number | null = null;
 
   if (ancillary_current != null && Number.isFinite(ancillary_current)) {
-    // Determine final NK amount: if indexing NK, use ancillary_new; otherwise keep current
     const finalAncNet =
       index_nebenkosten && ancillary_new != null && Number.isFinite(ancillary_new)
         ? ancillary_new
         : ancillary_current;
 
-    // MwSt for NK follows the same logic as rent
     const ancHas19 = is_gross_19 || ancillary_vat_rate === 19;
 
     ancNet = finalAncNet;
@@ -546,18 +519,12 @@ export async function generateIndexationPdf(
     y -= 12;
     ensureSpace(180);
 
-    page.drawText("Nebenkosten / Betriebskosten:", {
-      x: leftMargin,
-      y,
-      size: 10,
-      font: fontBold,
-    });
+    page.drawText("Nebenkosten / Betriebskosten:", { x: leftMargin, y, size: 10, font: fontBold });
     y -= 18;
 
     const ancLines: Line[] = [];
 
     if (index_nebenkosten && ancillary_new != null && Number.isFinite(ancillary_new)) {
-      // Show old → new NK with delta
       const ancOldStr = formatCurrencyDE(ancillary_current);
       const ancDeltaAbs = ancillary_new - ancillary_current;
       const ancDeltaStr = formatCurrencyDE(ancDeltaAbs);
@@ -571,17 +538,26 @@ export async function generateIndexationPdf(
       if (ancHas19) {
         const ancNewBruttoStr = formatCurrencyDE(ancillary_new * 1.19);
         ancLines.push({ label: "MwSt", value: "19,0 %", bold: false });
-        ancLines.push({ label: "neue Nebenkosten brutto (19 % USt.)", value: ancNewBruttoStr, bold: true, lineAbove: true });
+        ancLines.push({
+          label: "neue Nebenkosten brutto (19 % USt.)",
+          value: ancNewBruttoStr,
+          bold: true,
+          lineAbove: true,
+        });
       }
     } else {
-      // Non-indexed: just show current NK
       const ancNetStr = formatCurrencyDE(ancillary_current);
       ancLines.push({ label: "derzeitige Nebenkosten netto", value: ancNetStr, bold: true });
 
       if (ancHas19) {
         const ancBruttoStr = formatCurrencyDE(ancillary_current * 1.19);
         ancLines.push({ label: "MwSt", value: "19,0 %", bold: false });
-        ancLines.push({ label: "derzeitige Nebenkosten brutto (19 % USt.)", value: ancBruttoStr, bold: true, lineAbove: true });
+        ancLines.push({
+          label: "derzeitige Nebenkosten brutto (19 % USt.)",
+          value: ancBruttoStr,
+          bold: true,
+          lineAbove: true,
+        });
       }
     }
 
@@ -607,19 +583,17 @@ export async function generateIndexationPdf(
   }
 
   // ---------------------------------------------------------------------------
-  // Bloc Heizkosten – police 10
+  // Heizkosten block
   // ---------------------------------------------------------------------------
   let heatNet: number | null = null;
   let heatGross: number | null = null;
 
   if (heating_current != null && Number.isFinite(heating_current)) {
-    // Determine final heating amount: if indexing heating, use heating_new; otherwise keep current
     const finalHeatNet =
       index_heating && heating_new != null && Number.isFinite(heating_new)
         ? heating_new
         : heating_current;
 
-    // MwSt for heating follows the same logic as rent
     const heatHas19 = is_gross_19;
 
     heatNet = finalHeatNet;
@@ -628,18 +602,12 @@ export async function generateIndexationPdf(
     y -= 12;
     ensureSpace(180);
 
-    page.drawText("Heizkosten:", {
-      x: leftMargin,
-      y,
-      size: 10,
-      font: fontBold,
-    });
+    page.drawText("Heizkosten:", { x: leftMargin, y, size: 10, font: fontBold });
     y -= 18;
 
     const heatLines: Line[] = [];
 
     if (index_heating && heating_new != null && Number.isFinite(heating_new)) {
-      // Show old → new heating with delta
       const heatOldStr = formatCurrencyDE(heating_current);
       const heatDeltaAbs = heating_new - heating_current;
       const heatDeltaStr = formatCurrencyDE(heatDeltaAbs);
@@ -653,17 +621,26 @@ export async function generateIndexationPdf(
       if (heatHas19) {
         const heatNewBruttoStr = formatCurrencyDE(heating_new * 1.19);
         heatLines.push({ label: "MwSt", value: "19,0 %", bold: false });
-        heatLines.push({ label: "neue Heizkosten brutto (19 % USt.)", value: heatNewBruttoStr, bold: true, lineAbove: true });
+        heatLines.push({
+          label: "neue Heizkosten brutto (19 % USt.)",
+          value: heatNewBruttoStr,
+          bold: true,
+          lineAbove: true,
+        });
       }
     } else {
-      // Non-indexed: just show current heating
       const heatNetStr = formatCurrencyDE(heating_current);
       heatLines.push({ label: "derzeitige Heizkosten netto", value: heatNetStr, bold: true });
 
       if (heatHas19) {
         const heatBruttoStr = formatCurrencyDE(heating_current * 1.19);
         heatLines.push({ label: "MwSt", value: "19,0 %", bold: false });
-        heatLines.push({ label: "derzeitige Heizkosten brutto (19 % USt.)", value: heatBruttoStr, bold: true, lineAbove: true });
+        heatLines.push({
+          label: "derzeitige Heizkosten brutto (19 % USt.)",
+          value: heatBruttoStr,
+          bold: true,
+          lineAbove: true,
+        });
       }
     }
 
@@ -689,7 +666,7 @@ export async function generateIndexationPdf(
   }
 
   // ---------------------------------------------------------------------------
-  // TOTAL BOX – toujours police 10, en bas de page
+  // TOTAL BOX
   // ---------------------------------------------------------------------------
   {
     const totalNet = new_rent + (ancNet ?? 0) + (heatNet ?? 0);
@@ -730,12 +707,7 @@ export async function generateIndexationPdf(
 
     let yy = boxTopY - paddingBox - 2;
 
-    page.drawText(totalLabel, {
-      x: boxLeftX + 10,
-      y: yy,
-      size: 10,
-      font,
-    });
+    page.drawText(totalLabel, { x: boxLeftX + 10, y: yy, size: 10, font });
     page.drawText(formatCurrencyDE(totalNet), {
       x: boxLeftX + labelWidthRent,
       y: yy,
@@ -746,12 +718,7 @@ export async function generateIndexationPdf(
     yy -= lineHeight;
 
     if (totalGross != null) {
-      page.drawText("Gesamtmiete brutto", {
-        x: boxLeftX + 10,
-        y: yy,
-        size: 10,
-        font,
-      });
+      page.drawText("Gesamtmiete brutto", { x: boxLeftX + 10, y: yy, size: 10, font });
       page.drawText(formatCurrencyDE(totalGross), {
         x: boxLeftX + labelWidthRent,
         y: yy,
@@ -764,7 +731,7 @@ export async function generateIndexationPdf(
   }
 
   // ---------------------------------------------------------------------------
-  // Closing / signature – police 10
+  // Closing
   // ---------------------------------------------------------------------------
   const closingLines = [
     "Für Rückfragen stehen wir Ihnen selbstverständlich gern zur Verfügung.",
@@ -773,7 +740,7 @@ export async function generateIndexationPdf(
     "",
     "i.A. Nadine Köhler",
     "",
-    "Dieses Schreiben wurde elektronisch erstellt und ist daher ohne Unterschrift gültig."
+    "Dieses Schreiben wurde elektronisch erstellt und ist daher ohne Unterschrift gültig.",
   ];
 
   for (const line of closingLines) {
