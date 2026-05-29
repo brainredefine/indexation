@@ -73,6 +73,39 @@ function formatCurrencyDE(v: number): string {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Contact / signataire selon le préfixe de l'asset (main_property_id[1])
+//   - commence par "AD"  → Andrea Goldhahn
+//   - "AC" + tout le reste → Nadine Köhler (défaut)
+// Le bloc expéditeur en haut à droite est imprimé en dur dans le letterhead
+// (sur Nadine), donc on le recouvre d'un rectangle blanc et on le réécrit
+// systématiquement avec le bon contact (nom + e-mail + téléphone).
+// ---------------------------------------------------------------------------
+type Contact = {
+  name: string;
+  email: string;
+  phone: string;
+};
+
+function resolveContact(propertyLabel: string | null): Contact {
+  const label = (propertyLabel ?? "").trim().toUpperCase();
+
+  if (label.startsWith("AD")) {
+    return {
+      name: "Andrea Goldhahn",
+      email: "goldhahn@redefine.group",
+      phone: "0178 5314151",
+    };
+  }
+
+  // Assets "AC" + défaut → Nadine
+  return {
+    name: "Nadine Köhler",
+    email: "koehler@redefine.group",
+    phone: "0151 46303254",
+  };
+}
+
 export async function generateIndexationPdf(
   params: IndexationPdfParams
 ): Promise<Uint8Array> {
@@ -112,6 +145,7 @@ export async function generateIndexationPdf(
   let page: PDFPage;
   let secondTemplatePage: PDFPage | null = null;
   let secondTemplateUsed = false;
+  let templateLoaded = false;
 
   let width = 595.28;
   let height = 841.89;
@@ -148,6 +182,8 @@ export async function generateIndexationPdf(
     const size = page.getSize();
     width = size.width;
     height = size.height;
+
+    templateLoaded = true;
   } catch {
     page = pdfDoc.addPage([width, height]);
   }
@@ -160,6 +196,29 @@ export async function generateIndexationPdf(
 
   const font = await pdfDoc.embedFont(fontRegularBytes);
   const fontBold = await pdfDoc.embedFont(fontBoldBytes);
+
+  // ---------------------------------------------------------------------------
+  // Bloc expéditeur (haut droite) : on recouvre le contact imprimé dans le
+  // letterhead (Nadine) et on réécrit le bon contact selon l'asset.
+  // ---------------------------------------------------------------------------
+  const contact = resolveContact(property_label);
+
+  if (templateLoaded) {
+    // Recouvre le bloc "Es schreibt Ihnen: / Nadine Köhler / E-Mail: ..."
+    page.drawRectangle({
+      x: 403,
+      y: height - 270,
+      width: 153,
+      height: 73,
+      color: rgb(1, 1, 1),
+    });
+
+    const sx = 410.9;
+    page.drawText("Es schreibt Ihnen:", { x: sx, y: height - 220, size: 10, font: fontBold });
+    page.drawText(contact.name, { x: sx, y: height - 234, size: 10, font });
+    page.drawText(`E-Mail: ${contact.email}`, { x: sx, y: height - 248, size: 9, font });
+    page.drawText(`Tel.: ${contact.phone}`, { x: sx, y: height - 261, size: 9, font });
+  }
 
   const leftMargin = 60;
   const maxWidth = width - leftMargin * 2;
@@ -738,7 +797,7 @@ export async function generateIndexationPdf(
     "",
     "Mit freundlichen Grüßen",
     "",
-    "i.A. Nadine Köhler",
+    `i.A. ${contact.name}`,
     "",
     "Dieses Schreiben wurde elektronisch erstellt und ist daher ohne Unterschrift gültig.",
   ];
