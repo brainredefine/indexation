@@ -13,7 +13,7 @@
     "@supabase/supabase-js": "^2.75.0",
     "fontkit": "^2.0.4",
     "lightningcss": "^1.31.1",
-    "next": "^15.5.7",
+    "next": "^15.5.26",
     "pdf-lib": "^1.17.1",
     "react": "19.1.0",
     "react-dom": "19.1.0",
