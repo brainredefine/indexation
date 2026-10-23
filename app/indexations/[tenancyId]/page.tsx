@@ -3,6 +3,7 @@
 
 import { use, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
+import { roundPct1 } from "@/lib/percent";
 
 type M2O = [number, string] | null;
 
@@ -223,7 +224,7 @@ export default function IndexationDetailPage({
   ) => setForm((prev) => ({ ...prev, [key]: value }));
 
   const handlePctChange = (value: string) => {
-    const pct = value === "" ? null : Number(value) / 100;
+    const pct = value === "" ? null : roundPct1(Number(value) / 100);
     setForm((prev) => {
       const newRent = computeNewRent(prev.indexableRent, prev.nonIndexableRent, pct);
       return { ...prev, appliedPct: pct, newRent };
@@ -322,7 +323,7 @@ export default function IndexationDetailPage({
   };
 
   const handleAncillaryPctChange = (value: string) => {
-    const pct = value === "" ? null : Number(value) / 100;
+    const pct = value === "" ? null : roundPct1(Number(value) / 100);
     setForm((prev) => {
       const oldAnc = prev.oldAncillary ?? null;
       const newAnc =
@@ -360,7 +361,7 @@ export default function IndexationDetailPage({
   };
 
   const handleHeatingPctChange = (value: string) => {
-    const pct = value === "" ? null : Number(value) / 100;
+    const pct = value === "" ? null : roundPct1(Number(value) / 100);
     setForm((prev) => {
       const oldH = prev.oldHeating ?? null;
       const newH =
@@ -370,13 +371,13 @@ export default function IndexationDetailPage({
   };
 
   const ancPctDisplay =
-    form.ancillaryAppliedPct != null ? (form.ancillaryAppliedPct * 100).toFixed(2) : "";
+    form.ancillaryAppliedPct != null ? (form.ancillaryAppliedPct * 100).toFixed(1) : "";
 
   const heatPctDisplay =
-    form.heatingAppliedPct != null ? (form.heatingAppliedPct * 100).toFixed(2) : "";
+    form.heatingAppliedPct != null ? (form.heatingAppliedPct * 100).toFixed(1) : "";
 
   const pctDisplay =
-    form.appliedPct != null ? (form.appliedPct * 100).toFixed(2) : "";
+    form.appliedPct != null ? (form.appliedPct * 100).toFixed(1) : "";
 
   const previewText = useMemo(() => {
     return [
@@ -392,19 +393,19 @@ export default function IndexationDetailPage({
         : "",
       `New rent total: ${form.newRent ?? "\u2014"}`,
       `Applied %: ${
-        form.appliedPct != null ? (form.appliedPct * 100).toFixed(2) + "%" : "\u2014"
+        form.appliedPct != null ? (form.appliedPct * 100).toFixed(1) + "%" : "\u2014"
       }${form.splitRent ? " (on indexable portion)" : ""}`,
       form.indexNebenkosten
         ? `NK indexed: ${form.oldAncillary ?? "?"} → ${form.newAncillary ?? "?"} (${
             form.ancillaryAppliedPct != null
-              ? (form.ancillaryAppliedPct * 100).toFixed(2) + "%"
+              ? (form.ancillaryAppliedPct * 100).toFixed(1) + "%"
               : "\u2014"
           })`
         : "",
       form.indexHeating
         ? `Heizkosten indexed: ${form.oldHeating ?? "?"} → ${form.newHeating ?? "?"} (${
             form.heatingAppliedPct != null
-              ? (form.heatingAppliedPct * 100).toFixed(2) + "%"
+              ? (form.heatingAppliedPct * 100).toFixed(1) + "%"
               : "\u2014"
           })`
         : "",

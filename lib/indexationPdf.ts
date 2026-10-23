@@ -3,6 +3,7 @@ import { PDFDocument, PDFPage, rgb } from "pdf-lib";
 import fontkit from "@pdf-lib/fontkit";
 import fs from "fs";
 import path from "path";
+import { roundPct1 } from "@/lib/percent";
 
 export type IndexationPdfParams = {
   ind: string | null;
@@ -21,6 +22,7 @@ export type IndexationPdfParams = {
   index_cur_value: number | null;
   index_cur_label: string | null;
   index_delta: number | null;
+  pass_through?: number | null; // part répercutée selon le bail (ex: 0.6), sinon recalculée
 
   is_gross_19: boolean;
 
@@ -124,6 +126,7 @@ export async function generateIndexationPdf(
     index_cur_value,
     index_cur_label,
     index_delta,
+    pass_through,
     is_gross_19,
     ancillary_current,
     ancillary_vat_rate,
@@ -406,7 +409,7 @@ export async function generateIndexationPdf(
 
     const idxDelta =
       index_delta ??
-      (index_prev_value && index_cur_value ? index_cur_value / index_prev_value - 1 : null);
+      (index_prev_value && index_cur_value ? roundPct1(index_cur_value / index_prev_value - 1) : null);
 
     page.drawText("Indexentwicklung (VPI):", { x: leftMargin, y, size: 10, font: fontBold });
     y -= 18;
@@ -440,7 +443,7 @@ export async function generateIndexationPdf(
     if (idxDelta != null && applied_pct != null && idxDelta > 0) {
       const totalPct = idxDelta * 100;
       const appliedPctValue = applied_pct * 100;
-      const passThroughPct = (applied_pct / idxDelta) * 100;
+      const passThroughPct = (pass_through ?? applied_pct / idxDelta) * 100;
 
       const totalStr = totalPct.toLocaleString("de-DE", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
       const appliedStr = appliedPctValue.toLocaleString("de-DE", { minimumFractionDigits: 1, maximumFractionDigits: 1 });

@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { OdooClient, OdooM2O, m2oId } from "@/lib/odoo";
 import { germanIndexMonthly, germanIndexYearly } from "@/lib/indexationData";
 import { parseToMonthKey, prevMonthKey, addMonths } from "@/lib/dateKeys";
+import { roundPct1 } from "@/lib/percent";
 
 type TenancyRec = {
   id: number;
@@ -87,8 +88,8 @@ function coercePPP(v: number | boolean | null | undefined): number {
 }
 
 function capIncrease(val: number, cap?: number | null): number {
-  if (!cap || cap <= 0) return val;
-  return Math.min(val, cap);
+  if (!cap || cap <= 0) return roundPct1(val);
+  return roundPct1(Math.min(val, cap));
 }
 
 function isIndexingRentActive(v: boolean | number | string | null | undefined): boolean {
@@ -271,8 +272,8 @@ export async function GET(request: NextRequest) {
     const waitUntil = adjDateObj ? addMonths(adjDateObj, waiting) : null;
     const waitReached = !!(waitUntil && waitUntil <= now);
 
-    // 5) Delta
-    const delta = I_adj && I_cur ? I_cur / I_adj - 1 : null;
+    // 5) Delta (arrondi à 1 décimale, ex: 10,66 % → 10,7 %)
+    const delta = I_adj && I_cur ? roundPct1(I_cur / I_adj - 1) : null;
 
     // 6) Non-Automatic
     if (kind === "VPI" || kind === "VPI - Annual") {

@@ -48,7 +48,7 @@ const AM_UID: Record<string, number> = { BKO: 8, CFR: 12, FKE: 7, MSC: 9 };
 
 const cls = (...s: (string | false | undefined)[]) => s.filter(Boolean).join(" ");
 
-const fmtPct = (x: number | null | undefined, decimals: number = 2) =>
+const fmtPct = (x: number | null | undefined, decimals: number = 1) =>
   x == null ? "\u2014" : `${(x * 100).toFixed(decimals)}%`;
 
 const m2oName = (v: M2O) => (v && v[1]) || "\u2014";

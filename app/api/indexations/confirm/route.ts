@@ -6,6 +6,7 @@ import {
   generateIndexationPdf,
   IndexationPdfParams,
 } from "@/lib/indexationPdf";
+import { roundPct1 } from "@/lib/percent";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 type UiRow = Record<string, any> | null;
@@ -513,6 +514,22 @@ export async function POST(req: NextRequest) {
     const index_delta =
       typeof ui_row?.delta === "number" ? ui_row.delta : null;
 
+    // Part répercutée du bail : seulement si elle explique le % appliqué
+    // (sinon plafond ou % modifié à la main → le PDF recalcule le ratio)
+    const ppp =
+      typeof ui_row?.partially_passing_on === "number"
+        ? ui_row.partially_passing_on
+        : typeof ui_row?.partially_passing_on === "boolean"
+          ? (ui_row.partially_passing_on ? 1 : 0)
+          : null;
+    const pass_through =
+      ppp != null &&
+      index_delta != null &&
+      applied_pct != null &&
+      Math.abs(roundPct1(index_delta * ppp) - applied_pct) < 1e-9
+        ? ppp
+        : null;
+
     // ------------------------------------------------------------------
     // 11) PDF
     // ------------------------------------------------------------------
@@ -531,6 +548,7 @@ export async function POST(req: NextRequest) {
       index_cur_value,
       index_cur_label,
       index_delta,
+      pass_through,
       is_gross_19: isGross19,
       ancillary_current,
       ancillary_vat_rate,
